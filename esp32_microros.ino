@@ -1,35 +1,36 @@
 /*
-  ESP32 — micro-ROS Servo Controller
-  ===================================
+  ESP32 — micro-ROS servo controller
+  ====================================
 
-  The ESP32 is a micro-ROS node that subscribes to /arm_command
-  (std_msgs/Float32MultiArray, 5 elements) and drives the servos.
+  Subscribes to /arm_command and drives 5 servos.
+  Joystick control is handled on the PC via joy_to_arm ROS node.
 
-  Command array layout:
-    [0] base_velocity   -1.0 .. +1.0   (continuous 360 servo: 0 = stop)
-    [1] shoulder_angle  radians        (position servo)
-    [2] elbow_angle     radians        (position servo)
-    [3] wrist_angle     radians        (position servo)
-    [4] gripper         0.0 = open, 1.0 = closed
+  /arm_command payload (Float32MultiArray, 5 elements):
+    [0]  base_velocity   -1.0 .. +1.0   (continuous-rotation servo)
+    [1]  shoulder_angle  rad
+    [2]  elbow_angle     rad
+    [3]  wrist_angle     rad
+    [4]  gripper         0.0 open .. 1.0 closed
 
-  Transport: WiFi UDP to the micro-ROS agent running on the PC.
-
-  ── Required libraries ────────────────────────────────────────
-    micro_ros_arduino (branch matching your ROS 2 distro, e.g. 'humble'):
-      https://github.com/micro-ROS/micro_ros_arduino
-    ESP32Servo
-
-  ── Run the agent on the PC ───────────────────────────────────
-    docker run -it --rm --net=host microros/micro-ros-agent:humble \
-        udp4 --port 8888
+  PC side (run all three):
+    docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888
+    ros2 run joy joy_node
+    ros2 run manipulator_control joy_to_arm
+      -- or for RViz click-to-target --
+    ros2 launch manipulator_control hardware.launch.py
 
   Wiring:
-    Base  (MG996, 360) → GPIO 13
-    Shoulder (MG996)   → GPIO 12
-    Elbow (MG996)      → GPIO 14
-    Wrist (MG90S)      → GPIO 27
-    Gripper (SG90)     → GPIO 26
+    Base     (MG996, 360°) → GPIO 13
+    Shoulder (MG996)       → GPIO 12
+    Elbow    (MG996)       → GPIO 14
+    Wrist    (MG90S)       → GPIO 27
+    Gripper  (SG90)        → GPIO 26
+
+  Libraries needed:
+    ESP32Servo, micro_ros_arduino (Humble branch)
 */
+
+#include <ESP32Servo.h>
 
 #include <micro_ros_arduino.h>
 #include <rcl/rcl.h>
@@ -38,22 +39,15 @@
 #include <rclc/executor.h>
 #include <std_msgs/msg/float32_multi_array.h>
 
-#include <WiFi.h>
-#include <ESP32Servo.h>
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2
+#endif
 
 // ── WiFi / agent ──────────────────────────────────────────
-#define WIFI_SSID     "YOUR_WIFI_SSID"
-#define WIFI_PASS     "YOUR_WIFI_PASSWORD"
-#define AGENT_IP      "192.168.0.100"   // PC running the micro-ROS agent
-#define AGENT_PORT    8888
-
-// ── micro-ROS objects ─────────────────────────────────────
-rcl_subscription_t subscriber;
-std_msgs__msg__Float32MultiArray cmd_msg;
-rclc_executor_t executor;
-rclc_support_t support;
-rcl_allocator_t allocator;
-rcl_node_t node;
+#define WIFI_SSID   "S25 Ultra de Marco"
+#define WIFI_PASS   "password"
+#define AGENT_IP    "10.137.171.113"   // run: hostname -I | awk '{print $1}'
+#define AGENT_PORT  8888
 
 // ── Servo pins ────────────────────────────────────────────
 const int PIN_BASE  = 13;
@@ -62,169 +56,141 @@ const int PIN_ELBOW = 14;
 const int PIN_WRIST = 27;
 const int PIN_GRIP  = 26;
 
-Servo servo_base;
-Servo servo_shldr;
-Servo servo_elbow;
-Servo servo_wrist;
-Servo servo_grip;
+Servo servo_base, servo_shldr, servo_elbow, servo_wrist, servo_grip;
 
 // ── Pulse widths (µs) ─────────────────────────────────────
-// Standard range (1000–2000) safe for MG996R / MG90S / SG90.
-// Do NOT use 500–2500 — it can physically damage the gears.
 const int PULSE_MIN = 1000;
 const int PULSE_MAX = 2000;
 const int PULSE_MID = 1500;
+const int BASE_SPEED_RANGE = 200;  // tune if base is too fast/slow
 
-// Base continuous-rotation: 1500 = stop, ±200 µs for speed.
-// Tune BASE_SPEED_RANGE if the base is too fast or too slow.
-const int BASE_SPEED_RANGE = 200;
-
-// ── Position-servo joint limits (rad) ─────────────────────
 const float J_MIN = -1.5708f;   // -π/2
 const float J_MAX =  1.5708f;   // +π/2
 
-// ── Failsafe / reconnect ──────────────────────────────────
-unsigned long last_cmd_ms    = 0;
-unsigned long last_ping_ms   = 0;
-const unsigned long CMD_TIMEOUT_MS  = 1000;   // stop base after 1 s silence
-const unsigned long PING_INTERVAL_MS = 5000;  // check agent every 5 s
+// ── micro-ROS objects ─────────────────────────────────────
+rcl_subscription_t  sub_arm_cmd;
+std_msgs__msg__Float32MultiArray arm_cmd_msg;
 
-// ── Helpers ───────────────────────────────────────────────
+rclc_executor_t executor;
+rclc_support_t  support;
+rcl_allocator_t allocator;
+rcl_node_t      node;
+
+// ── Timing ────────────────────────────────────────────────
+unsigned long last_cmd_ms  = 0;
+unsigned long last_ping_ms = 0;
+const unsigned long CMD_TIMEOUT_MS   = 1000;
+const unsigned long PING_INTERVAL_MS = 5000;
+
+// ── Servo helpers ─────────────────────────────────────────
 int radToPulse(float rad) {
-  if (rad < J_MIN) rad = J_MIN;
-  if (rad > J_MAX) rad = J_MAX;
-  float t = (rad - J_MIN) / (J_MAX - J_MIN);   // 0..1
+  rad = constrain(rad, J_MIN, J_MAX);
+  float t = (rad - J_MIN) / (J_MAX - J_MIN);
   return (int)(PULSE_MIN + t * (PULSE_MAX - PULSE_MIN));
 }
 
 int baseVelToPulse(float v) {
-  if (v < -1.0f) v = -1.0f;
-  if (v >  1.0f) v =  1.0f;
-  return PULSE_MID + (int)(v * BASE_SPEED_RANGE);
+  return PULSE_MID + (int)(constrain(v, -1.0f, 1.0f) * BASE_SPEED_RANGE);
 }
 
 int gripperToPulse(float g) {
-  if (g < 0.0f) g = 0.0f;
-  if (g > 1.0f) g = 1.0f;
   // open = 1500 µs, closed = 1100 µs.
-  // Flip the sign or change 400 if your gripper closes the wrong way.
-  return PULSE_MID - (int)(g * 400);
+  // Flip sign or change 400 if your gripper closes the wrong way.
+  return PULSE_MID - (int)(constrain(g, 0.0f, 1.0f) * 400);
 }
 
-// ── Subscription callback ─────────────────────────────────
-void cmd_callback(const void * msgin) {
+// ── /arm_command callback ─────────────────────────────────
+void arm_cmd_callback(const void * msgin) {
   const std_msgs__msg__Float32MultiArray * m =
       (const std_msgs__msg__Float32MultiArray *) msgin;
-
   if (m->data.size < 5) return;
 
-  float base_v   = m->data.data[0];
-  float shoulder = m->data.data[1];
-  float elbow    = m->data.data[2];
-  float wrist    = m->data.data[3];
-  float gripper  = m->data.data[4];
-
-  servo_base.writeMicroseconds(baseVelToPulse(base_v));
-  servo_shldr.writeMicroseconds(radToPulse(shoulder));
-  servo_elbow.writeMicroseconds(radToPulse(elbow));
-  servo_wrist.writeMicroseconds(radToPulse(wrist));
-  servo_grip.writeMicroseconds(gripperToPulse(gripper));
+  servo_base.writeMicroseconds(baseVelToPulse(m->data.data[0]));
+  servo_shldr.writeMicroseconds(radToPulse(m->data.data[1]));
+  servo_elbow.writeMicroseconds(radToPulse(m->data.data[2]));
+  servo_wrist.writeMicroseconds(radToPulse(m->data.data[3]));
+  servo_grip.writeMicroseconds(gripperToPulse(m->data.data[4]));
 
   last_cmd_ms = millis();
 }
 
-// ── Error loop (blinks LED) ───────────────────────────────
+// ── micro-ROS init ────────────────────────────────────────
+#define RCCHECK(fn) { rcl_ret_t rc = fn; if (rc != RCL_RET_OK) error_loop(); }
+
 void error_loop() {
-  while (1) {
-    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-    delay(120);
-  }
+  while (1) { digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN)); delay(100); }
 }
 
-#define RCCHECK(fn) { rcl_ret_t rc = fn; if (rc != RCL_RET_OK) { error_loop(); } }
-#define RCSOFT(fn)  { rcl_ret_t rc = fn; (void) rc; }
-
-// ── micro-ROS init (called from setup and on reconnect) ───
 void microros_init() {
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "esp32_arm", "", &support));
 
-  RCCHECK(rclc_subscription_init_default(
-      &subscriber,
-      &node,
+  RCCHECK(rclc_subscription_init_default(&sub_arm_cmd, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "/arm_command"));
 
-  // Pre-allocate the message buffer (CRITICAL for micro-ROS)
-  cmd_msg.data.capacity = 8;
-  cmd_msg.data.data = (float*) malloc(8 * sizeof(float));
-  cmd_msg.data.size = 0;
+  arm_cmd_msg.data.capacity = 8;
+  arm_cmd_msg.data.data = (float*) malloc(8 * sizeof(float));
+  arm_cmd_msg.data.size = 0;
 
   RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
-  RCCHECK(rclc_executor_add_subscription(
-      &executor, &subscriber, &cmd_msg,
-      &cmd_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(&executor, &sub_arm_cmd, &arm_cmd_msg,
+      &arm_cmd_callback, ON_NEW_DATA));
 
   last_cmd_ms  = millis();
   last_ping_ms = millis();
 }
 
+// ─────────────────────────────────────────────────────────
 void setup() {
-  // ESP32Servo: allocate hardware timers
+  Serial.begin(115200);
+  pinMode(LED_BUILTIN, OUTPUT);
+
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
-  servo_base.setPeriodHertz(50);
-  servo_shldr.setPeriodHertz(50);
-  servo_elbow.setPeriodHertz(50);
-  servo_wrist.setPeriodHertz(50);
-  servo_grip.setPeriodHertz(50);
+  servo_base.setPeriodHertz(50);  servo_base.attach(PIN_BASE,   PULSE_MIN, PULSE_MAX);
+  servo_shldr.setPeriodHertz(50); servo_shldr.attach(PIN_SHLDR, PULSE_MIN, PULSE_MAX);
+  servo_elbow.setPeriodHertz(50); servo_elbow.attach(PIN_ELBOW, PULSE_MIN, PULSE_MAX);
+  servo_wrist.setPeriodHertz(50); servo_wrist.attach(PIN_WRIST, PULSE_MIN, PULSE_MAX);
+  servo_grip.setPeriodHertz(50);  servo_grip.attach(PIN_GRIP,   PULSE_MIN, PULSE_MAX);
 
-  servo_base.attach(PIN_BASE,   PULSE_MIN, PULSE_MAX);
-  servo_shldr.attach(PIN_SHLDR, PULSE_MIN, PULSE_MAX);
-  servo_elbow.attach(PIN_ELBOW, PULSE_MIN, PULSE_MAX);
-  servo_wrist.attach(PIN_WRIST, PULSE_MIN, PULSE_MAX);
-  servo_grip.attach(PIN_GRIP,   PULSE_MIN, PULSE_MAX);
-
-  // Safe startup state
   servo_base.writeMicroseconds(PULSE_MID);
   servo_shldr.writeMicroseconds(PULSE_MID);
   servo_elbow.writeMicroseconds(PULSE_MID);
   servo_wrist.writeMicroseconds(PULSE_MID);
   servo_grip.writeMicroseconds(PULSE_MID);
 
-  pinMode(LED_BUILTIN, OUTPUT);
-
   set_microros_wifi_transports(
-      (char*) WIFI_SSID,
-      (char*) WIFI_PASS,
-      (char*) AGENT_IP,
-      AGENT_PORT);
-
+      (char*) WIFI_SSID, (char*) WIFI_PASS,
+      (char*) AGENT_IP,  AGENT_PORT);
   delay(2000);
 
   microros_init();
+  Serial.println("Ready.");
 }
 
+// ─────────────────────────────────────────────────────────
 void loop() {
-  rclc_executor_spin_some(&executor, RCL_MS_TO_NS(20));
-
   unsigned long now = millis();
 
-  // Failsafe: stop base servo if commands stop arriving
+  rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+  // Stop base if /arm_command goes silent
   if (now - last_cmd_ms > CMD_TIMEOUT_MS) {
     servo_base.writeMicroseconds(PULSE_MID);
   }
 
-  // Reconnect watchdog: ping agent every PING_INTERVAL_MS.
-  // If unreachable, reboot — setup() re-establishes the connection.
+  // Reboot if agent becomes unreachable
   if (now - last_ping_ms > PING_INTERVAL_MS) {
     last_ping_ms = now;
     if (RMW_RET_OK != rmw_uros_ping_agent(100, 1)) {
       esp_restart();
     }
   }
+
+  delay(10);
 }

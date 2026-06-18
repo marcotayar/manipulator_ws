@@ -45,8 +45,11 @@ sudo apt install ros-humble-joint-state-publisher-gui \
                  ros-humble-robot-state-publisher \
                  ros-humble-rviz2 \
                  ros-humble-xacro \
-                 ros-humble-tf2-ros
+                 ros-humble-tf2-ros \
+                 ros-humble-joy
 ```
+
+`ros-humble-joy` is only needed if you are using a gamepad.
 
 ## Build
 
@@ -131,7 +134,7 @@ ros2 run manipulator_control base_gripper_teleop
 | `p` | gripper close |
 | `x` | quit |
 
-### 5. Real hardware
+### 5. Real hardware (joystick + click-to-target)
 
 See [Hardware control](#hardware-control) below.
 
@@ -140,9 +143,10 @@ See [Hardware control](#hardware-control) below.
 | Topic | Type | Publisher | Subscriber |
 |---|---|---|---|
 | `/joint_states` | `sensor_msgs/JointState` | `keyboard_teleop` or `ik_node` | `robot_state_publisher` |
-| `/target_pose` | `geometry_msgs/Point` | `click_to_target` | `ik_node`, `arm_commander` |
-| `/base_cmd` | `std_msgs/Float32` | `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander` |
-| `/gripper_cmd` | `std_msgs/Float32` | `base_gripper_teleop` | `arm_commander` |
+| `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm` | `ik_node`, `arm_commander` |
+| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander` |
+| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_gripper_teleop` | `arm_commander` |
+| `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_to_arm` |
 | `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS) |
 | `/clicked_point` | `geometry_msgs/PointStamped` | RViz | `click_to_target` |
 | `/click_marker` | `visualization_msgs/Marker` | `click_to_target` | RViz |
@@ -172,6 +176,19 @@ Two independent IK implementations are included:
 
 ## Hardware control
 
+The gamepad connects to the **PC** (USB or Bluetooth), not to the ESP32. The ESP32 only runs a lightweight micro-ROS subscriber and drives the servos.
+
+```
+Gamepad ──(USB/BT)──▶ PC
+                       ├─ joy_node      → /joy
+                       ├─ joy_to_arm    → /base_cmd, /target_pose, /gripper_cmd
+                       └─ arm_commander → /arm_command ──(WiFi)──▶ ESP32 servos
+```
+
+Arduino libraries required: **ESP32Servo**, **micro_ros_arduino** (Humble branch).
+
+---
+
 ### One-time firmware setup
 
 **1. Fill in your network details** at the top of `esp32_microros.ino`:
@@ -183,9 +200,9 @@ Two independent IK implementations are included:
 #define AGENT_PORT  8888
 ```
 
-**2. Flash** via Arduino IDE (board: *ESP32 Dev Module*, upload speed: 921600).
+**2. Flash** via Arduino IDE (board: *ESP32 Dev Module*, partition scheme: *Huge APP (3MB No OTA)*, upload speed: 921600).
 
-**3. Verify servo zero positions** — at startup all servos receive 1500 µs (center pulse). The arm should sit with each link pointing **horizontal** (shoulder/elbow/wrist all at 0 rad in `arm_ik_2d` convention). If a link points up or down instead, rotate the servo horn one spline and reflash.
+**3. Verify servo zero positions** — at startup all servos receive 1500 µs (center pulse). The arm should sit with each link pointing **horizontal** (shoulder/elbow/wrist all at 0 rad in `arm_ik_2d` convention). If a link points the wrong way, rotate the servo horn one spline and reflash.
 
 ---
 
@@ -197,61 +214,57 @@ Two independent IK implementations are included:
 docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888
 ```
 
-Wait for the line `[1] [RTPS Participant matched]` — this confirms the ESP32 connected.
+Wait for `[1] [RTPS Participant matched]` — confirms the ESP32 connected.
 
-**Terminal 2 — hardware stack**:
+**Terminal 2 — joystick driver:**
+
+```bash
+ros2 run joy joy_node
+```
+
+Plug in or pair your gamepad before running this. Verify it works with `ros2 topic echo /joy`.
+
+**Terminal 3 — joy_to_arm translator:**
 
 ```bash
 source ~/manipulator_ws/install/setup.bash
-ros2 launch manipulator_control hardware.launch.py
+ros2 run manipulator_control joy_to_arm
 ```
 
-This starts: `robot_state_publisher`, `arm_commander`, `click_to_target`, `base_vel_gui`, and RViz.
+**Terminal 4 — arm_commander** (IK + hardware bridge):
+
+```bash
+ros2 run manipulator_control arm_commander
+```
+
+> For RViz click-to-target and the base velocity GUI as well, replace terminals 3 and 4 with:
+> ```bash
+> ros2 launch manipulator_control hardware.launch.py
+> ```
+> Then run `joy_to_arm` in a fifth terminal.
 
 ---
 
-### Operating procedure
+### Gamepad button mapping
 
-**Step 1 — aim the base**
-
-The base (J1) is a continuous-rotation servo — it has no position feedback, so IK cannot aim it automatically. Use the floating **Base Velocity** window that opens alongside RViz:
-
-| Button | Effect |
+| Input | Action |
 |---|---|
-| ◄ Left | Base spins left at 0.5 rad/s |
-| Stop | Base stops |
-| Right ► | Base spins right at 0.5 rad/s |
+| **L1** | Base rotate left |
+| **R1** | Base rotate right |
+| **D-pad ↑ / ↓** | EE height +/− 5 mm |
+| **D-pad → / ←** | EE reach +/− 5 mm |
+| **△ / Y** | Gripper open |
+| **□ / X** | Gripper close |
 
-Rotate until the arm plane faces your target, then press **Stop**.
-
-**Step 2 — click to position**
-
-In RViz, select the **Publish Point** tool from the top toolbar, then click on the ground grid where you want the end-effector to go. `arm_commander` runs the 2D IK and sends the result to the ESP32 immediately.
+Default indices are set for **PS3/PS4 on Linux**. If your controller maps differently, run `ros2 topic echo /joy` while pressing buttons to find the right indices, then edit the constants at the top of [joy_to_arm.py](src/manipulator_control/manipulator_control/joy_to_arm.py).
 
 **Reachable workspace** (gripper pointing down, at ground level):
 
 ```
-0.115 m ≤ horizontal distance from base axis ≤ 0.160 m
+0.115 m ≤ reach from base axis ≤ 0.160 m
 ```
 
-Clicks outside this ring produce no motion — the IK returns no solution and the arm holds its last position.
-
-**Step 3 — gripper**
-
-Run in a separate terminal:
-
-```bash
-ros2 run manipulator_control base_gripper_teleop
-```
-
-Press `o` to open, `p` to close.
-
-Or publish directly:
-
-```bash
-ros2 topic pub --once /gripper_cmd std_msgs/Float32 "{data: 1.0}"  # close
-ros2 topic pub --once /gripper_cmd std_msgs/Float32 "{data: 0.0}"  # open
-```
+D-pad reach is clamped to this range. Targets outside the ring produce no motion.
 
 ---
 
@@ -259,19 +272,26 @@ ros2 topic pub --once /gripper_cmd std_msgs/Float32 "{data: 0.0}"  # open
 
 | Condition | Response |
 |---|---|
-| No `/arm_command` received for > 1 s | Base servo stops; position servos hold last angle |
+| `/arm_command` silent for > 1 s | Base servo stops; position servos hold last angle |
 | micro-ROS agent unreachable for > 5 s | ESP32 reboots and reconnects automatically |
 
-> **Note:** RViz shows the URDF at home pose — it does not mirror the real arm position. `arm_commander` does not publish `/joint_states`. Use RViz for click targeting only.
+> **Note:** RViz shows the URDF at its home pose and does not mirror the real arm. `arm_commander` does not publish `/joint_states`.
 
 ---
 
-### Servo calibration
+### Calibration
 
-All tuning constants are at the top of `esp32_microros.ino`:
+**Joystick feel** — edit constants at the top of [joy_to_arm.py](src/manipulator_control/manipulator_control/joy_to_arm.py):
 
 | Constant | Default | Adjust when… |
 |---|---|---|
-| `BASE_SPEED_RANGE` | 200 µs | Base spins too fast or too slow |
+| `STEP` | 0.005 m | D-pad steps feel too coarse or too fine |
+| `BASE_SPEED` | 0.5 rad/s | Base rotates too fast or too slow |
+
+**Servo tuning** — edit constants at the top of `esp32_microros.ino`:
+
+| Constant | Default | Adjust when… |
+|---|---|---|
+| `BASE_SPEED_RANGE` | 200 µs | Base doesn't reach the speed set by `BASE_SPEED` |
 | `gripperToPulse` span (`400`) | 400 µs | Gripper doesn't fully open/close, or closes the wrong way (flip sign) |
-| `PULSE_MIN` / `PULSE_MAX` | 1000 / 2000 µs | Servos don't reach full range (widen carefully — never below 600 / above 2400) |
+| `PULSE_MIN` / `PULSE_MAX` | 1000 / 2000 µs | Servos don't reach full range (never go below 600 / above 2400) |

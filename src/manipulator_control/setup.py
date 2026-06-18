@@ -24,6 +24,7 @@ setup(
             'base_vel_gui       = manipulator_control.base_vel_gui:main',
             'arm_commander      = manipulator_control.arm_commander:main',
             'base_gripper_teleop = manipulator_control.base_gripper_teleop:main',
+            'joy_to_arm          = manipulator_control.joy_to_arm:main',
         ],
     },
 )
