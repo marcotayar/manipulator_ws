@@ -16,13 +16,13 @@ If your controller maps differently, adjust the index constants below.
     D-pad down (axes[7]-)    EE height -5 mm
     D-pad right (axes[6]-)   EE reach  +5 mm
     D-pad left  (axes[6]+)   EE reach  -5 mm
-    Triangle / Y (buttons[3]) gripper open
-    Square   / X (buttons[2]) gripper close
+    Triangle / Y (buttons[3]) gripper open   (hold to keep spinning)
+    Square   / X (buttons[2]) gripper close  (hold to keep pressing)
 
 Publishes:
     /base_cmd     std_msgs/Float32          base velocity -1..1
     /target_pose  geometry_msgs/Point       x=reach, y=0, z=height
-    /gripper_cmd  std_msgs/Float32          0=open, 1=closed
+    /gripper_cmd  std_msgs/Float32          -1=open, 0=stop, +1=close
 """
 
 import rclpy
@@ -43,7 +43,7 @@ AXIS_DPAD_V  = 7   # +1 = up,    -1 = down
 STEP       = 0.005   # 5 mm per d-pad press
 BASE_SPEED = 0.5     # rad/s when L1/R1 held
 REACH_MIN  = 0.11
-REACH_MAX  = 0.16
+REACH_MAX  = 0.33    # out to near-full extension; IK rejects anything unreachable
 HEIGHT_MIN = 0.00
 HEIGHT_MAX = 0.15
 
@@ -64,22 +64,12 @@ class JoyToArm(Node):
         self._prev_buttons = []
         self._prev_axes    = []
 
-        # Heartbeat: publish pose and gripper even when buttons are idle so
-        # arm_commander doesn't lose state after 1 s of silence.
-        self.create_timer(0.2, self._heartbeat)
+        # No heartbeat: arm_commander holds state and republishes /arm_command
+        # at 50 Hz on its own. We only publish a target when the D-pad actually
+        # moves it, so the arm keeps its horizontal-extended startup pose until
+        # the operator commands a reachable target.
         self.get_logger().info(
             'joy_to_arm ready — connect a gamepad and run: ros2 run joy joy_node')
-
-    # ── Heartbeat ─────────────────────────────────────────
-    def _heartbeat(self):
-        pose = Point()
-        pose.x = self.reach
-        pose.z = self.height
-        self.pub_pose.publish(pose)
-
-        grip = Float32()
-        grip.data = self.gripper
-        self.pub_grip.publish(grip)
 
     # ── /joy callback ─────────────────────────────────────
     def _joy_cb(self, msg: Joy):
@@ -132,23 +122,20 @@ class JoyToArm(Node):
             self.get_logger().info(
                 f'EE target  reach={self.reach:.3f} m  height={self.height:.3f} m')
 
-        # ── Gripper (edge-triggered) ──────────────────────
-        def edge(idx):
-            return (len(btns) > idx and len(self._prev_buttons) > idx
-                    and btns[idx] and not self._prev_buttons[idx])
+        # ── Gripper (held: Y=open, X=close, neither=stop) ───
+        y = btns[BTN_OPEN]  if len(btns) > BTN_OPEN  else 0
+        x = btns[BTN_CLOSE] if len(btns) > BTN_CLOSE else 0
+        gripper_v = -1.0 if (y and not x) else \
+                     1.0 if (x and not y) else 0.0
 
-        if edge(BTN_OPEN):
-            self.gripper = 0.0
+        if gripper_v != self.gripper:
+            self.gripper = gripper_v
             grip = Float32()
+            grip.data = float(gripper_v)
             self.pub_grip.publish(grip)
-            self.get_logger().info('Gripper: open')
-
-        if edge(BTN_CLOSE):
-            self.gripper = 1.0
-            grip = Float32()
-            grip.data = 1.0
-            self.pub_grip.publish(grip)
-            self.get_logger().info('Gripper: close')
+            if gripper_v < 0:   self.get_logger().info('Gripper: opening')
+            elif gripper_v > 0: self.get_logger().info('Gripper: closing')
+            else:                self.get_logger().info('Gripper: stop')
 
         self._prev_buttons = list(btns)
         self._prev_axes    = list(axes)
