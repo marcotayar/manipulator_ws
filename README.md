@@ -21,6 +21,12 @@ L2  elbow → wrist:     0.09 m
 L3  wrist → EE tip:    0.16 m  (gripper_base 0.03 m + fingers 0.13 m)
 ```
 
+## Screenshots
+
+| RViz simulation — 45° base yaw | Qt hardware control panel |
+|:---:|:---:|
+| ![RRRR manipulator in RViz](docs/images/rviz_simulation.png) | ![Qt manipulator control panel](docs/images/qt_control_panel.png) |
+
 ## Packages
 
 | Package | Type | Purpose |
@@ -46,10 +52,13 @@ sudo apt install ros-humble-joint-state-publisher-gui \
                  ros-humble-rviz2 \
                  ros-humble-xacro \
                  ros-humble-tf2-ros \
-                 ros-humble-joy
+                 ros-humble-joy \
+                 python3-pyqt5
 ```
 
 `ros-humble-joy` is only needed if you are using a gamepad.
+`python3-matplotlib` and `python3-numpy` are optional dependencies for
+regenerating the workspace plot.
 
 ## Build
 
@@ -138,14 +147,35 @@ ros2 run manipulator_control base_gripper_teleop
 
 See [Hardware control](#hardware-control) below.
 
+### 6. Qt hardware control panel
+
+The Qt panel controls base rotation, cylindrical target coordinates
+(azimuth/reach/height), and the positional gripper through `arm_commander`:
+
+```bash
+ros2 launch manipulator_control control_gui.launch.py
+```
+
+For the full hardware stack (RViz, click-to-target, commander, and the Qt
+panel), run:
+
+```bash
+ros2 launch manipulator_control hardware.launch.py
+```
+
+Hold a base direction button to rotate; releasing it sends a stop command.
+The reach/height jog buttons move in 5 mm steps, and invalid targets are
+rejected in the panel. The status line turns green when `/arm_command`
+feedback is being received from `arm_commander`.
+
 ## ROS topics
 
 | Topic | Type | Publisher | Subscriber |
 |---|---|---|---|
 | `/joint_states` | `sensor_msgs/JointState` | `keyboard_teleop` or `ik_node` | `robot_state_publisher` |
-| `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm` | `ik_node`, `arm_commander` |
-| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander` |
-| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_gripper_teleop` | `arm_commander` |
+| `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm`, `arm_control_gui` | `ik_node`, `arm_commander` |
+| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander` |
+| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_gripper_teleop` | `arm_commander` |
 | `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_to_arm` |
 | `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS) |
 | `/clicked_point` | `geometry_msgs/PointStamped` | RViz | `click_to_target` |
@@ -166,13 +196,55 @@ Five floats sent to the ESP32 at 50 Hz:
 
 The base joint uses velocity (not position) because the hardware is a continuous-rotation servo with no angle feedback.
 
+### Action space and workspace
+
+The physical command action is:
+
+| Index | Action | Range |
+|---:|---|---|
+| 0 | Base velocity | −1.0 to +1.0 normalized |
+| 1 | Shoulder angle | +0.175 to +1.571 rad (10° to 90°) |
+| 2 | Elbow angle | −1.396 to +1.396 rad (−80° to 80°) |
+| 3 | Wrist angle | −1.396 to +1.396 rad (−80° to 80°) |
+| 4 | Gripper position | 0.0 open to 1.0 closed |
+
+`arm_commander` prints these ranges at startup. The plot below samples the
+joint limits, filters out points below ground, and revolves the planar set
+through the continuous base yaw. It does not model self-collision or payload.
+
+![Manipulator action and reachable workspace](docs/images/action_space.png)
+
+Regenerate the plot with:
+
+```bash
+python3 src/manipulator_control/scripts/plot_action_space.py
+```
+
 ## IK solvers
 
 Two independent IK implementations are included:
 
-**`arm_ik_2d.py`** (used by `arm_commander`) — 2D geometric IK in the vertical arm plane. Tries to keep the EE pointing straight down first, then sweeps outward in 5° steps if unreachable. This is what drives the real hardware.
+**`arm_ik_2d.py`** (used by `arm_commander`) — cylindrical decomposition plus
+2D geometric IK in the vertical arm plane. It converts a Cartesian target with
+`yaw = atan2(y, x)` and `reach = sqrt(x² + y²)`, then solves shoulder, elbow,
+and wrist. It prefers the EE pointing straight down and searches other
+orientations in 1° steps when necessary.
 
-**`ik_node.py`** (used by `click_move.launch.py`) — 3D IK for the full arm (adds base yaw from the click X/Y). Interpolates joint motion over 50 steps, reads actual EE position from the TF tree for trajectory drawing.
+**`ik_node.py`** (used by `click_move.launch.py`) — full cylindrical IK for the
+simulation. It commands J1 to the solved yaw, interpolates all four joints over
+50 steps, and reads the EE position from TF for trajectory drawing.
+
+#### Why hardware base yaw remains manual
+
+The cylindrical solver returns an absolute base yaw, and the URDF simulation
+uses it directly. The physical J1 is a 360° continuous-rotation servo: it only
+accepts speed and has no encoder, so the software cannot know its current angle
+or close the loop on a desired yaw. The Qt azimuth field is therefore a target
+reference for hardware while the operator aligns J1 with the hold buttons.
+
+For true four-joint hardware IK, replace J1 with a positional servo or add an
+absolute encoder. Then `/arm_command[0]` can carry base yaw instead of velocity
+and the firmware can close the position loop.
 
 ## Hardware control
 
@@ -182,6 +254,7 @@ The gamepad connects to the **PC** (USB or Bluetooth), not to the ESP32. The ESP
 Gamepad ──(USB/BT)──▶ PC
                        ├─ joy_node      → /joy
                        ├─ joy_to_arm    → /base_cmd, /target_pose, /gripper_cmd
+                       ├─ arm_control_gui → /base_cmd, /target_pose, /gripper_cmd
                        └─ arm_commander → /arm_command ──(WiFi)──▶ ESP32 servos
 ```
 
@@ -258,13 +331,15 @@ ros2 run manipulator_control arm_commander
 
 Default indices are set for **PS3/PS4 on Linux**. If your controller maps differently, run `ros2 topic echo /joy` while pressing buttons to find the right indices, then edit the constants at the top of [joy_to_arm.py](src/manipulator_control/manipulator_control/joy_to_arm.py).
 
-**Reachable workspace** (gripper pointing down, at ground level):
+**Reachable workspace** (ground-level targets, with wrist orientation allowed
+to tilt when straight-down is unavailable):
 
 ```
-0.115 m ≤ reach from base axis ≤ 0.160 m
+approximately 0.120 m ≤ reach from base axis ≤ 0.324 m
 ```
 
-D-pad reach is clamped to this range. Targets outside the ring produce no motion.
+The UI input bounds are intentionally broader; the IK solver validates every
+reach/height pair and rejects targets outside the actual joint-limited region.
 
 ---
 
@@ -293,5 +368,6 @@ D-pad reach is clamped to this range. Targets outside the ring produce no motion
 | Constant | Default | Adjust when… |
 |---|---|---|
 | `BASE_SPEED_RANGE` | 200 µs | Base doesn't reach the speed set by `BASE_SPEED` |
-| `gripperToPulse` span (`400`) | 400 µs | Gripper doesn't fully open/close, or closes the wrong way (flip sign) |
-| `PULSE_MIN` / `PULSE_MAX` | 1000 / 2000 µs | Servos don't reach full range (never go below 600 / above 2400) |
+| `GRIP_OPEN_DEG` | 80° | Gripper does not open to the desired position |
+| `GRIP_CLOSED_DEG` | 140° | Gripper does not close to the desired position |
+| `SERVO_MIN_US` / `SERVO_MAX_US` | 500 / 2500 µs | Positional servo travel is compressed or reaches its mechanical stop |

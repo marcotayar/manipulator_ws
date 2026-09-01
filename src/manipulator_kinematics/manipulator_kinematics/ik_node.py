@@ -60,7 +60,8 @@ def solve_ik(x, y, z, logger=None):
             logger.warn(f'Target below ground: z={z:.3f}')
         return None
 
-    # J1: base yaw (continuous, no position limit)
+    # Cylindrical decomposition: J1 handles azimuth while J2-J4 solve the
+    # radius/height cross-section.
     theta1 = atan2(y, x)
 
     # Horizontal distance from base axis to target
@@ -184,8 +185,9 @@ class IKNode(Node):
             return  # unreachable — don't move
 
         self.get_logger().info(
-            f'Target: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) → '
-            f'J1={target[0]:.2f} J2={target[1]:.2f} '
+            f'Cylindrical target: yaw={target[0]:.2f} rad, '
+            f'radius={sqrt(msg.x * msg.x + msg.y * msg.y):.3f} m, '
+            f'height={msg.z:.3f} m → J1={target[0]:.2f} J2={target[1]:.2f} '
             f'J3={target[2]:.2f} J4={target[3]:.2f}'
         )
 
@@ -272,9 +274,14 @@ class IKNode(Node):
 def main():
     rclpy.init()
     node = IKNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

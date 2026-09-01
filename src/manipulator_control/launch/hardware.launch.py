@@ -5,7 +5,7 @@ Starts:
   - robot_state_publisher  (URDF → TF, for RViz)
   - arm_commander          (IK + hardware bridge → /arm_command → ESP32)
   - click_to_target        (RViz clicks → /target_pose → arm_commander)
-  - base_vel_gui           (floating buttons for base velocity)
+  - arm_control_gui        (Qt controls for the base, arm target, and gripper)
   - rviz2
 
 Workflow:
@@ -13,7 +13,7 @@ Workflow:
        docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888
   2. ros2 launch manipulator_control hardware.launch.py
   3. In RViz select 'Publish Point', click the grid to move the arm.
-     Use the base velocity buttons to rotate the base first.
+     Use the Qt panel to rotate the base and command the arm and gripper.
 
 Note: RViz shows the URDF at its home pose — it does not mirror the
 real hardware position (arm_commander does not publish /joint_states).
@@ -58,8 +58,8 @@ def generate_launch_description():
 
         Node(
             package='manipulator_control',
-            executable='base_vel_gui',
-            name='base_vel_gui',
+            executable='arm_control_gui',
+            name='arm_control_gui',
             output='screen',
         ),
 

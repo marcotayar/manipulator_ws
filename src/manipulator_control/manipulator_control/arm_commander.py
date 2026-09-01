@@ -30,7 +30,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, Float32
 from geometry_msgs.msg import Point
-from math import sqrt, degrees
+from math import degrees
 
 from manipulator_control import arm_ik_2d as ik
 
@@ -46,6 +46,7 @@ class ArmCommander(Node):
         self.elbow = ik.START_ELBOW
         self.wrist = ik.START_WRIST
         self.gripper = 0.0             # open
+        self.target_base_yaw = 0.0     # reference only; physical J1 has no encoder
 
         # Publisher to ESP32
         self.pub = self.create_publisher(Float32MultiArray, '/arm_command', 10)
@@ -62,34 +63,36 @@ class ArmCommander(Node):
             'arm_commander ready.\n'
             '  /target_pose -> 2D IK (shoulder/elbow/wrist)\n'
             '  /base_cmd    -> base velocity (-1..1)\n'
-            '  /gripper_cmd -> gripper position (0 open .. 1 closed)'
+            '  /gripper_cmd -> gripper position (0 open .. 1 closed)\n'
+            'Action space (/arm_command):\n'
+            f'{ik.format_action_space()}'
         )
 
     def target_cb(self, msg: Point):
-        # Planar reach: horizontal distance in the arm plane, vertical = z
-        reach = sqrt(msg.x * msg.x + msg.y * msg.y)
-        height = msg.z
-
         prev = {'shoulder': self.shoulder,
                 'elbow': self.elbow,
                 'wrist': self.wrist}
-        sol = ik.solve(reach, height, prev)
+        sol = ik.solve_cartesian(msg.x, msg.y, msg.z, prev)
         if sol is None:
             self.get_logger().warn(
-                f'IK unreachable: reach={reach:.3f} m, height={height:.3f} m'
+                f'IK unreachable: x={msg.x:.3f} m, y={msg.y:.3f} m, '
+                f'z={msg.z:.3f} m'
             )
             return
 
+        self.target_base_yaw = sol['base_yaw']
         self.shoulder = sol['shoulder']
         self.elbow = sol['elbow']
         self.wrist = sol['wrist']
 
         self.get_logger().info(
-            f'IK ok: reach={reach:.3f} h={height:.3f} | '
+            f'IK ok: yaw={degrees(self.target_base_yaw):.0f}° reference, '
+            f'reach={sol["reach"]:.3f} h={sol["height"]:.3f} | '
             f'shoulder={degrees(self.shoulder):.0f} '
             f'elbow={degrees(self.elbow):.0f} '
             f'wrist={degrees(self.wrist):.0f} '
-            f'(phi={degrees(sol["phi"]):.0f})'
+            f'(phi={degrees(sol["phi"]):.0f}); '
+            'align physical base manually'
         )
 
     def base_cb(self, msg: Float32):
@@ -113,9 +116,14 @@ class ArmCommander(Node):
 def main():
     rclpy.init()
     node = ArmCommander()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -45,9 +45,33 @@ START_SHOULDER = radians(90)
 START_ELBOW = radians(-60)
 START_WRIST = radians(-80)
 
+# /arm_command action vector. J1 is a continuous-rotation servo, so its action
+# is velocity rather than an absolute yaw angle.
+ACTION_SPACE = (
+    ('base velocity', -1.0, 1.0, 'normalized'),
+    ('shoulder', SH_MIN, SH_MAX, 'rad'),
+    ('elbow', EL_MIN, EL_MAX, 'rad'),
+    ('wrist', WR_MIN, WR_MAX, 'rad'),
+    ('gripper', 0.0, 1.0, 'open..closed'),
+)
+
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def cartesian_to_cylindrical(x, y, z):
+    """Return ``(yaw, radius, height)`` for a world-frame Cartesian target."""
+    return atan2(y, x), sqrt(x * x + y * y), z
+
+
+def format_action_space():
+    """Human-readable description of the five-element hardware command."""
+    lines = []
+    for index, (name, lower, upper, unit) in enumerate(ACTION_SPACE):
+        lines.append(
+            f'  [{index}] {name:<13} [{lower:+.3f}, {upper:+.3f}] {unit}')
+    return '\n'.join(lines)
 
 
 def _solve_2link(wx, wy, l1, l2, elbow_up):
@@ -174,6 +198,25 @@ def solve(tip_x, tip_y, prev=None):
                 (c['wrist'] - prev['wrist']) ** 2)
 
     return min(near, key=pose_dist2)
+
+
+def solve_cartesian(x, y, z, prev=None):
+    """Solve a world target as cylindrical yaw plus the planar arm IK.
+
+    The returned ``base_yaw`` is directly usable by the URDF simulation. On
+    physical hardware it is a reference only: the continuous-rotation base
+    servo has no angular feedback and accepts velocity, not position.
+    """
+    base_yaw, reach, height = cartesian_to_cylindrical(x, y, z)
+    solution = solve(reach, height, prev)
+    if solution is None:
+        return None
+    return {
+        'base_yaw': base_yaw,
+        'reach': reach,
+        'height': height,
+        **solution,
+    }
 
 
 def forward(shoulder, elbow, wrist):

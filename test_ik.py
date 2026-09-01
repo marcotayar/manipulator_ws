@@ -165,6 +165,34 @@ def run_tests():
                 if err >= 1e-6:
                     all_passed = False
                 print(f"  2D ({reach:.3f}, {height:.3f}): {status}  error={err:.2e} m")
+
+        print()
+        print("Cylindrical IK (base yaw + planar arm):")
+        cylindrical = [
+            (0.140, 0.000, 0.000),
+            (0.099, 0.099, 0.000),
+            (0.000, -0.140, 0.000),
+        ]
+        for x, y, z in cylindrical:
+            sol = ik2d.solve_cartesian(x, y, z)
+            if sol is None:
+                print(f"  XYZ ({x:.3f}, {y:.3f}, {z:.3f}): {FAIL} — returned None")
+                all_passed = False
+                continue
+            radial_x, actual_z = ik2d.forward(
+                sol['shoulder'], sol['elbow'], sol['wrist'])
+            actual_x = radial_x * math.cos(sol['base_yaw'])
+            actual_y = radial_x * math.sin(sol['base_yaw'])
+            err = math.sqrt(
+                (actual_x - x) ** 2
+                + (actual_y - y) ** 2
+                + (actual_z - z) ** 2)
+            status = PASS if err < 1e-6 else FAIL
+            if err >= 1e-6:
+                all_passed = False
+            print(
+                f"  XYZ ({x:.3f}, {y:.3f}, {z:.3f}): {status}  "
+                f"yaw={math.degrees(sol['base_yaw']):.1f}°  error={err:.2e} m")
     except ImportError as e:
         print(f"  (skipped — could not import arm_ik_2d: {e})")
 
