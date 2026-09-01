@@ -39,6 +39,12 @@ SH_MIN, SH_MAX = radians(10), radians(90)
 EL_MIN, EL_MAX = radians(-80), radians(80)
 WR_MIN, WR_MAX = radians(-80), radians(80)
 
+# Safe start pose — MUST match esp32_microros.ino setup(). Gripper hovers above
+# ground, low shoulder load. Single source of truth for all nodes.
+START_SHOULDER = radians(90)
+START_ELBOW = radians(-60)
+START_WRIST = radians(-80)
+
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))

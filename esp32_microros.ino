@@ -10,7 +10,7 @@
     [1]  shoulder_angle  rad
     [2]  elbow_angle     rad
     [3]  wrist_angle     rad
-    [4]  gripper         -1.0 open .. 0.0 stop .. +1.0 close
+    [4]  gripper         0.0 open .. 1.0 closed   (positional SG90)
 
   PC side (run all three):
     docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888
@@ -24,7 +24,7 @@
     Shoulder (MG996)       → GPIO 12
     Elbow    (MG996)       → GPIO 14
     Wrist    (SG90)        → GPIO 27
-    Gripper  (MG90S)       → GPIO 26
+    Gripper  (SG90, positional) → GPIO 26
 
   Libraries needed:
     ESP32Servo, micro_ros_arduino (Humble branch)
@@ -63,7 +63,10 @@ const int PULSE_MIN = 1000;   // velocity servos (base/gripper): range around 15
 const int PULSE_MAX = 2000;
 const int PULSE_MID = 1500;
 const int BASE_SPEED_RANGE   = 200;  // tune if base is too fast/slow
-const int GRIPPER_SPEED_RANGE = 200;  // tune if gripper is too fast/slow
+
+// Gripper is a POSITIONAL SG90: 0.0 -> open angle, 1.0 -> closed angle.
+const int GRIP_OPEN_DEG   = 80;
+const int GRIP_CLOSED_DEG = 140;
 
 // Positional servos (shoulder/elbow/wrist) use write(degrees): the attach
 // range must match the servo's FULL travel or 0-180° comes out squashed.
@@ -110,10 +113,10 @@ int baseVelToPulse(float v) {
   return PULSE_MID + (int)(constrain(v, -1.0f, 1.0f) * BASE_SPEED_RANGE);
 }
 
-int gripperToPulse(float v) {
-  // v = -1.0 open, 0.0 stop, +1.0 close.
-  // Flip sign of v in arm_cmd_callback if direction is wrong.
-  return PULSE_MID + (int)(constrain(v, -1.0f, 1.0f) * GRIPPER_SPEED_RANGE);
+int gripperToDeg(float g) {
+  // g = 0.0 open .. 1.0 closed  ->  angle between the two calibrated positions.
+  g = constrain(g, 0.0f, 1.0f);
+  return (int)(GRIP_OPEN_DEG + g * (GRIP_CLOSED_DEG - GRIP_OPEN_DEG));
 }
 
 // ── /arm_command callback ─────────────────────────────────
@@ -126,7 +129,7 @@ void arm_cmd_callback(const void * msgin) {
   servo_shldr.write(jointToDeg(m->data.data[1], SH_HOME, SH_DIR));
   servo_elbow.write(jointToDeg(m->data.data[2], EL_HOME, EL_DIR));
   servo_wrist.write(jointToDeg(m->data.data[3], WR_HOME, WR_DIR));
-  servo_grip.writeMicroseconds(gripperToPulse(m->data.data[4]));
+  servo_grip.write(gripperToDeg(m->data.data[4]));
 
   last_cmd_ms = millis();
 }
@@ -173,7 +176,7 @@ void setup() {
   servo_shldr.setPeriodHertz(50); servo_shldr.attach(PIN_SHLDR, SERVO_MIN_US, SERVO_MAX_US);
   servo_elbow.setPeriodHertz(50); servo_elbow.attach(PIN_ELBOW, SERVO_MIN_US, SERVO_MAX_US);
   servo_wrist.setPeriodHertz(50); servo_wrist.attach(PIN_WRIST, SERVO_MIN_US, SERVO_MAX_US);
-  servo_grip.setPeriodHertz(50);  servo_grip.attach(PIN_GRIP,   PULSE_MIN,    PULSE_MAX);
+  servo_grip.setPeriodHertz(50);  servo_grip.attach(PIN_GRIP,   SERVO_MIN_US, SERVO_MAX_US);
 
   // Safe start pose — gripper hovers ABOVE ground, low shoulder load.
   // shoulder=+90° (tucked up), elbow=-60°, wrist=-80°  -> tip ~11 cm above ground.
@@ -181,7 +184,7 @@ void setup() {
   servo_shldr.write(jointToDeg( 1.5708f, SH_HOME, SH_DIR));      // shoulder up
   servo_elbow.write(jointToDeg(-1.0472f, EL_HOME, EL_DIR));      // elbow folded
   servo_wrist.write(jointToDeg(-1.3963f, WR_HOME, WR_DIR));      // gripper down-ish
-  servo_grip.writeMicroseconds(PULSE_MID);                       // stop
+  servo_grip.write(gripperToDeg(0.0f));                          // open
 
   set_microros_wifi_transports(
       (char*) WIFI_SSID, (char*) WIFI_PASS,

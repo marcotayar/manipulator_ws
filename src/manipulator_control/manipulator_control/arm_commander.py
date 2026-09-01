@@ -11,7 +11,7 @@ Outputs (std_msgs/Float32MultiArray, 5 floats):
   [1] shoulder_angle  rad
   [2] elbow_angle     rad
   [3] wrist_angle     rad
-  [4] gripper         -1.0 open .. 0.0 stop .. +1.0 close  (velocity servo)
+  [4] gripper         0.0 open .. 1.0 closed  (positional servo)
 
 Inputs:
   /target_pose  (geometry_msgs/Point)   -> 2D IK for shoulder/elbow/wrist
@@ -30,7 +30,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, Float32
 from geometry_msgs.msg import Point
-from math import sqrt, degrees, radians
+from math import sqrt, degrees
 
 from manipulator_control import arm_ik_2d as ik
 
@@ -42,10 +42,10 @@ class ArmCommander(Node):
         # Current command state
         self.base_vel = 0.0
         # Safe start: gripper hovers ABOVE ground, low shoulder load.
-        self.shoulder = radians(90)    # tucked up
-        self.elbow = radians(-60)      # folded
-        self.wrist = radians(-80)      # gripper down-ish
-        self.gripper = 0.0             # stopped
+        self.shoulder = ik.START_SHOULDER
+        self.elbow = ik.START_ELBOW
+        self.wrist = ik.START_WRIST
+        self.gripper = 0.0             # open
 
         # Publisher to ESP32
         self.pub = self.create_publisher(Float32MultiArray, '/arm_command', 10)
@@ -62,7 +62,7 @@ class ArmCommander(Node):
             'arm_commander ready.\n'
             '  /target_pose -> 2D IK (shoulder/elbow/wrist)\n'
             '  /base_cmd    -> base velocity (-1..1)\n'
-            '  /gripper_cmd -> gripper velocity (-1 open .. 0 stop .. 1 close)'
+            '  /gripper_cmd -> gripper position (0 open .. 1 closed)'
         )
 
     def target_cb(self, msg: Point):
@@ -96,7 +96,7 @@ class ArmCommander(Node):
         self.base_vel = max(-1.0, min(1.0, msg.data))
 
     def gripper_cb(self, msg: Float32):
-        self.gripper = max(-1.0, min(1.0, msg.data))
+        self.gripper = max(0.0, min(1.0, msg.data))
 
     def publish_cmd(self):
         msg = Float32MultiArray()

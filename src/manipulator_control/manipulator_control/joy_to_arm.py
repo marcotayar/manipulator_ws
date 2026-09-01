@@ -16,13 +16,13 @@ If your controller maps differently, adjust the index constants below.
     D-pad down (axes[7]-)    EE height -5 mm
     D-pad right (axes[6]-)   EE reach  +5 mm
     D-pad left  (axes[6]+)   EE reach  -5 mm
-    Triangle / Y (buttons[3]) gripper open   (hold to keep spinning)
-    Square   / X (buttons[2]) gripper close  (hold to keep pressing)
+    Triangle / Y (buttons[3]) gripper open
+    Square   / X (buttons[2]) gripper close
 
 Publishes:
     /base_cmd     std_msgs/Float32          base velocity -1..1
     /target_pose  geometry_msgs/Point       x=reach, y=0, z=height
-    /gripper_cmd  std_msgs/Float32          -1=open, 0=stop, +1=close
+    /gripper_cmd  std_msgs/Float32          0=open, 1=closed (position)
 """
 
 import rclpy
@@ -30,6 +30,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Point
+
+from manipulator_control import arm_ik_2d as ik
 
 # ── Button / axis indices (PS3/PS4 on Linux) ──────────────
 # Run `ros2 topic echo /joy` to find your controller's mapping.
@@ -57,8 +59,10 @@ class JoyToArm(Node):
         self.pub_pose  = self.create_publisher(Point,   '/target_pose', 10)
         self.pub_grip  = self.create_publisher(Float32, '/gripper_cmd', 10)
 
-        self.reach   = 0.140
-        self.height  = 0.000
+        # Start the target at the arm's actual start pose so the first D-pad
+        # press continues smoothly instead of yanking the arm somewhere else.
+        self.reach, self.height = ik.forward(
+            ik.START_SHOULDER, ik.START_ELBOW, ik.START_WRIST)
         self.gripper = 0.0
 
         self._prev_buttons = []
@@ -122,20 +126,18 @@ class JoyToArm(Node):
             self.get_logger().info(
                 f'EE target  reach={self.reach:.3f} m  height={self.height:.3f} m')
 
-        # ── Gripper (held: Y=open, X=close, neither=stop) ───
+        # ── Gripper (positional: Y=open, X=close, latched) ──
         y = btns[BTN_OPEN]  if len(btns) > BTN_OPEN  else 0
         x = btns[BTN_CLOSE] if len(btns) > BTN_CLOSE else 0
-        gripper_v = -1.0 if (y and not x) else \
-                     1.0 if (x and not y) else 0.0
+        target = 0.0 if (y and not x) else \
+                 1.0 if (x and not y) else self.gripper  # hold last position
 
-        if gripper_v != self.gripper:
-            self.gripper = gripper_v
+        if target != self.gripper:
+            self.gripper = target
             grip = Float32()
-            grip.data = float(gripper_v)
+            grip.data = float(target)
             self.pub_grip.publish(grip)
-            if gripper_v < 0:   self.get_logger().info('Gripper: opening')
-            elif gripper_v > 0: self.get_logger().info('Gripper: closing')
-            else:                self.get_logger().info('Gripper: stop')
+            self.get_logger().info('Gripper: ' + ('open' if target == 0.0 else 'closed'))
 
         self._prev_buttons = list(btns)
         self._prev_axes    = list(axes)
