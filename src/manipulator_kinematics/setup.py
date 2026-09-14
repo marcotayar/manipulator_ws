@@ -15,6 +15,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ik_node = manipulator_kinematics.ik_node:main',
+            'pid_sim_node = manipulator_kinematics.pid_sim_node:main',
         ],
     },
 )

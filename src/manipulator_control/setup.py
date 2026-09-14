@@ -14,6 +14,7 @@ setup(
             'launch/click_move.launch.py',
             'launch/hardware.launch.py',
             'launch/control_gui.launch.py',
+            'launch/pid_sim.launch.py',
         ]),
     ],
     install_requires=['setuptools'],

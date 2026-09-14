@@ -1,0 +1,578 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=22mm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,array,longtable}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\definecolor{navy}{HTML}{17365D}
+\definecolor{blue}{HTML}{2774C7}
+\definecolor{lightblue}{HTML}{EAF3FC}
+\definecolor{warning}{HTML}{9C5B00}
+\definecolor{codebg}{HTML}{F3F5F7}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=blue,citecolor=navy}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{RRRR Manipulator}
+\rhead{Mathematical Model and PID Control}
+\cfoot{\thepage}
+\setlength{\headheight}{14pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\setlist{nosep,leftmargin=6mm}
+\lstset{backgroundcolor=\color{codebg},basicstyle=\ttfamily\small,
+  frame=single,rulecolor=\color{gray!35},breaklines=true,columns=fullflexible}
+
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\sat}[2]{\operatorname{sat}_{#1}\!\left(#2\right)}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{Mathematical Modeling and Closed-Loop PID Control}\\[3mm]
+\large Four-DOF RRRR Desktop Manipulator with Positional Gripper}
+\author{ROS 2 Humble implementation: \code{manipulator\_ws}}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+This document derives the kinematic and numerical dynamic models implemented in
+the ROS 2 workspace, then derives the discrete PID controllers used by the
+closed-loop simulator. It distinguishes model parameters from experimentally
+identified hardware data, defines every coordinate conversion and ROS interface,
+and gives a direct path from simulated encoder feedback to encoder-based hardware
+deployment. The implementation referenced throughout is the PID simulation
+node; geometry and inverse kinematics are shared with the manipulator control
+package.
+\end{abstract}
+
+\begin{center}
+\colorbox{lightblue}{\parbox{0.93\textwidth}{\textbf{Scope.}
+The current closed-loop simulator is a deliberately compact numerical plant,
+not a full multibody or finite-element model. It includes nominal inertia,
+viscous damping, gravity, effort saturation, hard stops, disturbances, and
+simulated encoder states. Parameters marked \emph{nominal} must be identified
+on the real arm before gains are transferred to hardware.}}
+\end{center}
+
+\tableofcontents
+\newpage
+
+\section{Robot definition}
+
+\subsection{Generalized coordinates}
+The robot has one base-yaw joint and three serial pitch joints:
+\[
+  \vect q=\begin{bmatrix}q_1&q_2&q_3&q_4\end{bmatrix}^{T}.
+\]
+The URDF convention used by the numerical plant is:
+\begin{itemize}
+  \item $q_1$: rotation about world $+z$; continuous.
+  \item $q_2,q_3,q_4$: rotation about each local $+y$ axis.
+  \item At $q_2=q_3=q_4=0$, all arm links point along $+z$.
+  \item Positive pitch rotates a link from $+z$ toward the radial $+x$ direction.
+\end{itemize}
+The gripper has two mirrored prismatic joints. Both receive the same joint
+coordinate; opposite URDF axis vectors create symmetric finger motion.
+
+\subsection{Geometry}
+\begin{table}[h]
+\centering
+\caption{Geometry used by URDF, FK, IK, and PID simulation.}
+\begin{tabular}{lll}
+\toprule
+Symbol & Meaning & Value\\
+\midrule
+$h_0$ & shoulder height above ground & $0.090\ \mathrm{m}$\\
+$L_1$ & shoulder to elbow & $0.100\ \mathrm{m}$\\
+$L_2$ & elbow to wrist & $0.090\ \mathrm{m}$\\
+$L_3$ & wrist to end-effector tip & $0.160\ \mathrm{m}$\\
+$r_b$ & base radius & $0.060\ \mathrm{m}$\\
+$h_b$ & base-cylinder height & $0.070\ \mathrm{m}$\\
+$w_l,d_l$ & link cross-section & $0.030\times0.030\ \mathrm{m}$\\
+$s_f$ & finger travel per side & $0.030\ \mathrm{m}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+The nominal geometric reach is
+\[
+  L_1+L_2+L_3=0.350\ \mathrm{m},
+\]
+but the usable workspace is smaller and non-convex because of joint limits,
+ground clearance, and end-effector orientation feasibility.
+
+\subsection{Masses and URDF inertias}
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule Component & Mass (kg)\\\midrule
+Base & 0.150\\ Turntable & 0.030\\ Link 1 & 0.095\\ Link 2 & 0.095\\
+Gripper parameter & 0.080\\ Each finger & 0.010\\\bottomrule
+\end{tabular}
+\end{table}
+For a uniform box of side lengths $(a,b,c)$, the URDF uses
+\[
+I_{xx}=\frac{m}{12}(b^2+c^2),\quad
+I_{yy}=\frac{m}{12}(a^2+c^2),\quad
+I_{zz}=\frac{m}{12}(a^2+b^2).
+\]
+For a solid cylinder of radius $r$ and height $h$,
+\[
+I_{xx}=I_{yy}=\frac{m}{12}(3r^2+h^2),\qquad
+I_{zz}=\frac{1}{2}mr^2.
+\]
+These URDF values describe individual visual links. The compact PID plant uses
+separate effective diagonal joint inertias listed in Section~\ref{sec:plant}.
+
+\subsection{Limits and command space}
+The URDF permits $q_2,q_3,q_4\in[-90^\circ,90^\circ]$. Hardware IK applies
+stricter servo-safe limits in its angle-from-horizontal convention:
+\begin{align*}
+10^\circ&\leq \alpha_2\leq90^\circ,\\
+-80^\circ&\leq \alpha_3\leq80^\circ,\\
+-80^\circ&\leq \alpha_4\leq80^\circ.
+\end{align*}
+The deployment vector on \code{/arm\_command} is
+\[
+\vect a=\begin{bmatrix}u_b&\alpha_2&\alpha_3&\alpha_4&c_g\end{bmatrix}^{T},
+\]
+where $u_b\in[-1,1]$ is normalized base velocity and $c_g\in[0,1]$ is
+normalized gripper closure (0 open, 1 closed).
+
+\section{Coordinate conventions and forward kinematics}
+
+\subsection{Hardware-to-URDF conversion}
+Hardware IK measures arm angles from the horizontal plane, while the URDF
+measures pitch from vertical. The exact conversion implemented by the simulator is
+\begin{equation}
+\boxed{
+q_2=\frac{\pi}{2}-\alpha_2,\qquad
+q_3=-\alpha_3,\qquad
+q_4=-\alpha_4.}
+\label{eq:conversion}
+\end{equation}
+This conversion has been checked by substituting solved configurations into the
+URDF forward kinematics; tested Cartesian residuals were below displayed
+floating-point precision ($0.000$ mm).
+
+\subsection{Planar forward kinematics}
+Define cumulative pitch angles
+\[
+\theta_2=q_2,\qquad \theta_3=q_2+q_3,\qquad
+\theta_4=q_2+q_3+q_4.
+\]
+The radial reach and tip height are
+\begin{align}
+r(\vect q)&=L_1\sin\theta_2+L_2\sin\theta_3+L_3\sin\theta_4,\\
+z(\vect q)&=h_0+L_1\cos\theta_2+L_2\cos\theta_3+L_3\cos\theta_4.
+\end{align}
+Base yaw revolves the planar chain around the world $z$ axis:
+\begin{equation}
+\boxed{
+x=r\cos q_1,\qquad y=r\sin q_1,\qquad z=z(\vect q).}
+\label{eq:fk}
+\end{equation}
+Thus the Cartesian target is decomposed cylindrically as
+\[
+q_1^{\star}=\operatorname{atan2}(y^{\star},x^{\star}),\qquad
+r^{\star}=\sqrt{(x^{\star})^2+(y^{\star})^2}.
+\]
+
+\section{Inverse kinematics}
+The deployed IK is solved in the vertical arm plane using hardware angles
+$\alpha_i$. For a candidate end-effector approach angle $\phi$, subtract link
+$L_3$ to obtain the wrist point relative to the shoulder:
+\begin{align}
+w_x &= r^{\star}-L_3\cos\phi,\\
+w_y &= z^{\star}-h_0-L_3\sin\phi,\\
+d^2 &= w_x^2+w_y^2.
+\end{align}
+A two-link solution exists only when
+\[
+|L_1-L_2|\leq d\leq L_1+L_2.
+\]
+The elbow angle follows the cosine law:
+\begin{equation}
+\cos\alpha_3=\frac{d^2-L_1^2-L_2^2}{2L_1L_2}.
+\end{equation}
+Both branches are evaluated:
+\[
+\alpha_3=\pm\arccos\left(
+\frac{d^2-L_1^2-L_2^2}{2L_1L_2}\right).
+\]
+Then
+\begin{align}
+k_1&=L_1+L_2\cos\alpha_3,\\
+k_2&=L_2\sin\alpha_3,\\
+\alpha_2&=\operatorname{atan2}(w_y,w_x)-\operatorname{atan2}(k_2,k_1),\\
+\alpha_4&=\phi-(\alpha_2+\alpha_3).
+\end{align}
+
+The solver tests $\phi=-90^\circ$ first, then searches outward in $1^\circ$
+increments through the full angular range. It rejects configurations violating
+servo-safe limits or $z<0$. The primary cost minimizes departure from a
+downward-pointing end effector:
+\[
+J_{\phi}=|\phi+90^\circ|.
+\]
+Among equally oriented candidates, continuity is selected by
+\[
+J_q=(\alpha_2-\alpha_{2,p})^2+(
+\alpha_3-\alpha_{3,p})^2+(
+\alpha_4-\alpha_{4,p})^2.
+\]
+A $10^{-6}$ rad comparison tolerance preserves mathematically on-limit poses;
+accepted outputs are clamped back to the hard limits, so tolerance never widens
+the actuator command space.
+
+\section{Numerical dynamic plant}\label{sec:plant}
+
+\subsection{Model structure}
+A general rigid manipulator obeys
+\begin{equation}
+\vect M(\vect q)\ddot{\vect q}
++\vect C(\vect q,\dot{\vect q})\dot{\vect q}
++\vect G(\vect q)+\vect F(\dot{\vect q})
+=\vect\tau+\vect\tau_d.
+\label{eq:full-dynamics}
+\end{equation}
+The implemented numerical plant intentionally approximates this with diagonal
+constant inertia, viscous damping, exact configuration-dependent gravity for
+lumped masses, and an external disturbance input:
+\begin{equation}
+\boxed{
+I_i\ddot q_i=\tau_i-b_i\dot q_i-G_i(\vect q)+\tau_{d,i}.}
+\label{eq:plant}
+\end{equation}
+Coriolis coupling, Coulomb friction, backlash, gearbox elasticity, electrical
+motor dynamics, and voltage sag are not modeled.
+
+\begin{table}[h]
+\centering
+\caption{Nominal simulation parameters.}
+\begin{tabular}{lrrr}
+\toprule Joint & $I_i$ (kg m$^2$) & $b_i$ & $|\tau_i|_{\max}$\\\midrule
+J1 & 0.0012 & 0.003 & 2.2\\
+J2 & 0.0100 & 0.025 & 4.8\\
+J3 & 0.0038 & 0.012 & 2.2\\
+J4 & 0.0008 & 0.005 & 2.2\\\bottomrule
+\end{tabular}
+\end{table}
+These are control-development values, not identified servo-shaft inertias or
+measured torque limits.
+
+\subsection{Gravity model}
+Let $m_1=m_2=0.095$ kg, $m_g=0.080$ kg, $m_f=0.010$ kg, and define the distal
+lumped mass
+\[
+m_d=m_g+2m_f=0.100\ \mathrm{kg}.
+\]
+With $s_2=\sin q_2$, $s_{23}=\sin(q_2+q_3)$ and
+$s_{234}=\sin(q_2+q_3+q_4)$, the implemented gravity vector is
+\begin{align}
+G_1 &=0,\\
+G_2 &=-g\left[
+\frac{m_1L_1}{2}s_2
++m_2\left(L_1s_2+\frac{L_2}{2}s_{23}\right)
++m_d\left(L_1s_2+L_2s_{23}+\frac{L_3}{2}s_{234}\right)
+\right],\\
+G_3 &=-g\left[
+\frac{m_2L_2}{2}s_{23}
++m_d\left(L_2s_{23}+\frac{L_3}{2}s_{234}\right)
+\right],\\
+G_4 &=-g\left[\frac{m_dL_3}{2}s_{234}\right],
+\end{align}
+with $g=9.80665\ \mathrm{m/s^2}$. J1 has no gravity moment because its axis is
+vertical in this model.
+
+\subsection{Discrete integration and stops}
+The controller and plant run at
+\[
+\Delta t=0.005\ \mathrm{s}\quad(200\ \mathrm{Hz}).
+\]
+Semi-explicit Euler integration is used:
+\begin{align}
+\dot q_{i,k+1}&=\dot q_{i,k}+\ddot q_{i,k}\Delta t,\\
+q_{i,k+1}&=q_{i,k}+\dot q_{i,k+1}\Delta t.
+\end{align}
+Measured state is published at 50 Hz. J2--J4 have ideal hard stops at
+$\pm\pi/2$; outward velocity is cancelled at a stop while inward motion remains
+possible. J1 is continuous.
+
+\section{PID controller derivation}
+
+\subsection{Position loops for J2--J4}
+For joint $i$, define
+\[
+e_i=q_i^{\star}-q_i.
+\]
+The implemented controller differentiates the measurement rather than the
+error:
+\begin{equation}
+\tau_{fb,i}=K_{p,i}e_i+K_{i,i}\eta_i-K_{d,i}\dot q_i.
+\label{eq:pid}
+\end{equation}
+This prevents a setpoint step from producing derivative kick. Gravity is fed
+forward and total effort is saturated:
+\begin{equation}
+\boxed{
+\tau_i=\sat{[-\tau_{\max,i},\tau_{\max,i}]}
+{\tau_{fb,i}+G_i(\vect q)}.}
+\label{eq:gravity-ff}
+\end{equation}
+If the model were exact and the arm stationary at the target, $e_i=0$ and
+$\tau_i=G_i$, which cancels gravity in Equation~\eqref{eq:plant}.
+
+\subsection{Discrete integral and anti-windup}
+The candidate integral state is
+\[
+\tilde\eta_k=\sat{[-\eta_{\max},\eta_{\max}]}
+{\eta_{k-1}+e_k\Delta t}.
+\]
+It is accepted if the raw feedback command is unsaturated, or if the error
+points back toward the controllable range. Otherwise $\eta_k=\eta_{k-1}$. This
+conditional integration prevents continued windup while an actuator is pinned.
+Position-loop integral limit is 2.0 rad\,s.
+
+\subsection{Base velocity loop}
+The base command remains compatible with the continuous-rotation servo:
+\[
+\dot q_1^{\star}=1.5\,\sat{[-1,1]}{u_b}.
+\]
+Velocity error is
+\[
+e_v=\dot q_1^{\star}-\dot q_1,
+\]
+and the velocity PID is
+\[
+\tau_1=K_{p,v}e_v+K_{i,v}\int e_vdt-K_{d,v}\ddot q_1.
+\]
+Raw measured acceleration and its filtered derivative state are
+\begin{align}
+\ddot q_{1,k}^{raw}&=\frac{\dot q_{1,k}-\dot q_{1,k-1}}{\Delta t},\\
+\ddot q_{1,k}^{(m)}&=\lambda\ddot q_{1,k-1}^{(m)}
+ +(1-\lambda)\ddot q_{1,k}^{raw},\qquad \lambda=0.95.
+\end{align}
+The simulated effort is limited to $\pm2.2$. The low-pass derivative is
+essential: differentiating sampled encoder velocity directly amplifies noise
+and, in a discrete loop, can destabilize the base controller.
+
+\subsection{Gripper loop}
+Let $c_g\in[0,1]$ be desired closure and $c\in[0,1]$ be measured simulated
+closure. A position PID drives the normalized plant. The corresponding finger
+joint coordinate is
+\begin{equation}
+q_f=-0.03(1-c).
+\end{equation}
+Thus $c=0$ gives $q_f=-0.03$ m and 90 mm measured finger separation (open),
+while $c=1$ gives $q_f=0$ and 30 mm separation (closed).
+
+\subsection{Controller gains}
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule Loop & $K_p$ & $K_i$ & $K_d$\\\midrule
+J1 velocity & 0.035 & 0.080 & 0.0015\\
+J2 position & 0.90 & 0.22 & 0.15\\
+J3 position & 0.42 & 0.12 & 0.075\\
+J4 position & 0.16 & 0.045 & 0.030\\
+Gripper closure & 18.0 & 5.0 & 0.8\\\bottomrule
+\end{tabular}
+\end{table}
+These gains are tuned only for the nominal plant in this document. Dimensional
+units depend on each simulated effort channel; they are not automatically valid
+PWM gains.
+
+\section{Closed-loop interpretation}
+Ignoring gravity feedforward error, integral action, and saturation, a single
+position axis has
+\[
+I\ddot q+b\dot q=K_p(q^{\star}-q)-K_d\dot q.
+\]
+The closed-loop transfer function is
+\begin{equation}
+\frac{Q(s)}{Q^{\star}(s)}=
+\frac{K_p}{Is^2+(b+K_d)s+K_p}.
+\end{equation}
+Equivalent second-order parameters are
+\[
+\omega_n=\sqrt{\frac{K_p}{I}},\qquad
+\zeta=\frac{b+K_d}{2\sqrt{IK_p}}.
+\]
+Integral action adds a pole at the origin and removes constant residual error,
+but reduces phase margin. Saturation, gravity variation, and the hard stops make
+the actual model nonlinear, so these formulas guide tuning but do not replace
+simulation or measurement.
+
+\section{ROS 2 signal model}
+\begin{longtable}{p{0.25\textwidth}p{0.25\textwidth}p{0.42\textwidth}}
+\toprule Topic & Type & Meaning\\\midrule
+\endhead
+\code{/arm\_command} & Float32MultiArray & Deployment-format setpoint
+$[u_b,\alpha_2,\alpha_3,\alpha_4,c_g]$.\\
+\code{/joint\_states} & JointState & Simulated encoder positions, velocities,
+and efforts; this is measured plant state, not a copied command.\\
+\code{/joint\_setpoint} & JointState & Desired URDF position and base velocity.\\
+\code{/pid\_diagnostics} & Float32MultiArray & Five errors followed by five
+controller efforts.\\
+\code{/sim\_disturbance} & Float32MultiArray & Persistent additive efforts
+$[\tau_{d1},\tau_{d2},\tau_{d3},\tau_{d4},d_g]$; publish zeros to remove.\\
+\bottomrule
+\end{longtable}
+The full simulation launches with:
+\begin{lstlisting}
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch manipulator_control pid_sim.launch.py
+\end{lstlisting}
+This launch runs Qt, \code{arm\_commander}, the PID plant, click-to-target,
+\code{robot\_state\_publisher}, and RViz. It intentionally does not run
+\code{ik\_node}, because two publishers on \code{/joint\_states} would make the
+measured state nondeterministic.
+
+\section{Numerical validation results}
+For target $(x,y,z)=(0.20,0.00,0.02)$ m, measured behavior was:
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule Joint & Final error & Peak speed & Settle within $1^\circ$\\\midrule
+J1 & $0.000^\circ$ & $0.000$ rad/s & immediate\\
+J2 & $0.488^\circ$ & $2.733$ rad/s & $3.210$ s\\
+J3 & $0.199^\circ$ & $1.128$ rad/s & $0.429$ s\\
+J4 & $0.003^\circ$ & $0.019$ rad/s & immediate\\\bottomrule
+\end{tabular}
+\end{table}
+A 0.25 N\,m shoulder disturbance applied for 0.5 s produced a
+$15.33^\circ$ peak error and recovered to $0.614^\circ$ after 4 s. Base command
+$u_b=0.5$ requested 0.750 rad/s, measured 0.750 rad/s, and stopped at
+0.0001 rad/s. The gripper reached both exact endpoints.
+
+An extreme $\pm20$ N\,m stress input---several times the modeled actuator
+limits---could not move J2--J4 beyond $\pm90^\circ$ and did not produce NaN or
+infinite state. This validates stop invariants, not realistic recovery.
+
+For $(x,y,z)=(0.22,0.08,0.04)$ m after settling:
+\[
+\vect q^{\star}_{2:4}=
+\begin{bmatrix}0.79758&0.53283&1.32249\end{bmatrix}^{T}\ \mathrm{rad},
+\]
+and measured values matched to the displayed precision. RViz rendered the
+measured pose through \code{robot\_state\_publisher}.
+
+\section{Encoder-based hardware deployment}
+
+\subsection{Required measurements}
+Each encoder sample should provide timestamped $q_i$. Velocity should be
+estimated with a filtered differentiator; a simple first-order form is
+\begin{align}
+\dot q_{raw,k}&=\frac{\operatorname{wrap}(q_k-q_{k-1})}{\Delta t},\\
+\dot q_k&=\lambda\dot q_{k-1}+(1-\lambda)\dot q_{raw,k},
+\end{align}
+with angle wrapping for continuous J1. Choose $\lambda$ from measured encoder
+noise and sample rate. Publish hardware measurements as \code{/joint\_states}.
+
+\subsection{Controller migration}
+Preserve the current setpoint and diagnostic interfaces. Replace only the
+numerical plant step with encoder input and actuator output:
+\[
+\text{simulation: }\tau\rightarrow\text{numerical plant}\rightarrow(q,\dot q),
+\]
+\[
+\text{hardware: }\tau\rightarrow\text{PWM/current command}\rightarrow
+\text{encoder }(q,\dot q).
+\]
+There must be exactly one actuator-command owner. Do not run the PID hardware
+node and an open-loop ESP32 command publisher simultaneously.
+
+\subsection{Important limitation of hobby positional servos}
+Shoulder, elbow, wrist, and gripper servos already contain hidden inner position
+controllers. An outer ROS PID therefore forms a cascade:
+\[
+\text{outer PID}\rightarrow\text{servo angle command}\rightarrow
+\text{internal controller}\rightarrow\text{motor}.
+\]
+The outer loop should initially be slow relative to the inner loop. Start with
+trajectory limiting and P-only correction, then add D and finally I only when
+measurements justify them. Aggressive outer gains can excite the unknown inner
+loop, backlash, and compliance.
+
+For the continuous base with an encoder, use a cascaded controller. Outer yaw
+position generates velocity:
+\[
+\dot q_1^{\star}=\sat{[-\omega_{max},\omega_{max}]}
+{K_{p,\theta}\operatorname{wrap}(q_1^{\star}-q_1)},
+\]
+and the inner velocity PID generates the normalized servo command. Wrapping is
+essential near $\pm\pi$:
+\[
+\operatorname{wrap}(\delta)=\operatorname{atan2}(\sin\delta,\cos\delta).
+\]
+
+\subsection{Identification and tuning sequence}
+\begin{enumerate}
+\item Calibrate encoder zero, sign, wrap, sample timing, and missing-data behavior.
+\item Measure J1 neutral pulse and velocity versus PWM offset in both directions.
+\item Apply small safe steps and log setpoint, encoder position, velocity, and PWM.
+\item Estimate delay, deadband, steady speed, damping, and gravity/load dependence.
+\item Replace nominal $I_i,b_i$ and actuator limits with identified values.
+\item Tune P first at low payload; increase until responsive but non-oscillatory.
+\item Add D using filtered measured velocity to control overshoot.
+\item Add small I only to remove persistent bias; retain anti-windup.
+\item Validate at joint limits, supply-voltage extremes, maximum payload, and stale feedback.
+\item Require a hardware watchdog that stops J1 and freezes safe position commands when
+encoder or ROS commands are stale.
+\end{enumerate}
+
+\section{Model limitations and interpretation}
+\begin{itemize}
+\item The diagonal inertia approximation neglects configuration-dependent mass
+matrix and Coriolis coupling.
+\item Centers of mass are idealized at link midpoints; wiring, servo bodies,
+horns, fasteners, and payload are not identified.
+\item Effort units are numerical torque-like units; hobby-servo PWM is not torque.
+\item Gravity feedforward uses the same approximate model as the plant, so its
+nominal steady-state result is intentionally optimistic.
+\item The 1-degree IK orientation search can make workspace feasibility granular
+near boundaries.
+\item There is no collision, table contact, Coulomb friction, stiction, backlash,
+thermal limit, current limit, voltage sag, or communications jitter model.
+\item Numerical gains demonstrate controller structure and behavior. They are not
+safe hardware gains without encoder calibration and plant identification.
+\end{itemize}
+
+\section{Source-to-equation traceability}
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.43\textwidth}p{0.49\textwidth}}
+\toprule Source & Mathematical responsibility\\\midrule
+\code{arm\_ik\_2d.py} & Geometry, limits, cylindrical conversion, FK/IK,
+approach-angle search, continuity selection.\\
+\code{pid\_sim\_node.py: PID.update} & Equation~\eqref{eq:pid}, integral clamp,
+derivative-on-measurement, conditional anti-windup.\\
+\code{pid\_sim\_node.py: gravity\_torque} & Implemented $\vect G(\vect q)$.\\
+\code{pid\_sim\_node.py: timer\_cb} & Equations~\eqref{eq:gravity-ff} and
+\eqref{eq:plant}, Euler integration, saturation, hard stops.\\
+\code{manipulator.urdf.xacro} & Link dimensions, masses, link inertias, axes,
+and joint limits.\\
+\code{arm\_commander.py} & Target-to-IK conversion and 50 Hz deployment vector.\\
+\code{pid\_sim.launch.py} & Single-owner closed-loop simulation topology.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Conclusion}
+The implemented simulator is a useful intermediate step between direct
+kinematic visualization and encoder-controlled hardware. Its central invariant
+is that setpoint and measurement are separate: PID effort changes the plant,
+and only plant state becomes \code{/joint\_states}. The equations, numerical
+constants, limitations, and ROS interfaces are explicit, so future encoder data
+can replace nominal assumptions without changing the surrounding command stack.
+
+\end{document}

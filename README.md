@@ -168,16 +168,45 @@ The reach/height jog buttons move in 5 mm steps, and invalid targets are
 rejected in the panel. The status line turns green when `/arm_command`
 feedback is being received from `arm_commander`.
 
+### 7. Closed-loop PID numerical simulation
+
+Runs the same Qt panel and `/arm_command` interface as deployment, but replaces
+the ESP32/servos with a 200 Hz numerical plant. J2-J4 use position PID with
+gravity feedforward; J1 uses velocity PID; the gripper uses position PID.
+`/joint_states` contains simulated encoder measurements, not copied commands:
+
+```bash
+ros2 launch manipulator_control pid_sim.launch.py
+```
+
+Desired state is published on `/joint_setpoint`. `/pid_diagnostics` contains
+five errors followed by five controller efforts. Publish five additive efforts
+to `/sim_disturbance` to test rejection, then publish zeros to remove them:
+
+```bash
+ros2 topic pub -1 /sim_disturbance std_msgs/msg/Float32MultiArray \
+  "{data: [0.0, 0.25, 0.0, 0.0, 0.0]}"
+ros2 topic pub -1 /sim_disturbance std_msgs/msg/Float32MultiArray \
+  "{data: [0.0, 0.0, 0.0, 0.0, 0.0]}"
+```
+
+The inertia, damping, and PID gains in `pid_sim_node.py` are nominal simulation
+parameters. Identify the real plant after installing encoders before reusing
+those gains on hardware.
+
 ## ROS topics
 
 | Topic | Type | Publisher | Subscriber |
 |---|---|---|---|
-| `/joint_states` | `sensor_msgs/JointState` | `keyboard_teleop` or `ik_node` | `robot_state_publisher` |
+| `/joint_states` | `sensor_msgs/JointState` | `keyboard_teleop`, `ik_node`, or `pid_sim` | `robot_state_publisher` |
+| `/joint_setpoint` | `sensor_msgs/JointState` | `pid_sim` | diagnostics/plots |
 | `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm`, `arm_control_gui` | `ik_node`, `arm_commander` |
-| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander` |
-| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_gripper_teleop` | `arm_commander` |
+| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander`, `ik_node` |
+| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_gripper_teleop` | `arm_commander`, `ik_node` |
 | `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_to_arm` |
-| `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS) |
+| `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS), `pid_sim` |
+| `/pid_diagnostics` | `std_msgs/Float32MultiArray` | `pid_sim` | diagnostics/plots |
+| `/sim_disturbance` | `std_msgs/Float32MultiArray` | test/operator | `pid_sim` |
 | `/clicked_point` | `geometry_msgs/PointStamped` | RViz | `click_to_target` |
 | `/click_marker` | `visualization_msgs/Marker` | `click_to_target` | RViz |
 | `/ee_trajectory` | `visualization_msgs/Marker` | `ik_node` | RViz |
