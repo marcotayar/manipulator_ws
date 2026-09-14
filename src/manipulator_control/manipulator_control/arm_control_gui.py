@@ -38,6 +38,8 @@ from manipulator_control import arm_ik_2d as ik
 BASE_SPEED_MIN = 0.1
 BASE_SPEED_MAX = 1.0
 TARGET_STEP = 0.005
+# Spinbox display resolution (3 decimals); the start target is snapped to it.
+TARGET_STEP_MM = 0.001
 REACH_MIN = 0.11
 REACH_MAX = 0.33
 HEIGHT_MIN = 0.00
@@ -127,16 +129,28 @@ class ArmControlWindow(QMainWindow):
         self.status_timer.timeout.connect(self._refresh_status)
         self.status_timer.start(250)
 
+    @staticmethod
+    def _icon_button(symbol, tooltip, object_name=None):
+        """Square symbol button. The tooltip carries the wording it replaces."""
+        button = QPushButton(symbol)
+        button.setToolTip(tooltip)
+        button.setObjectName(object_name or 'iconButton')
+        return button
+
     def _build_base_group(self):
-        group = QGroupBox('Base rotation')
+        group = QGroupBox('Base rotation  ⟳')
         layout = QVBoxLayout(group)
 
         speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel('Speed'))
+        speed_icon = QLabel('»')
+        speed_icon.setObjectName('fieldIcon')
+        speed_icon.setToolTip('Rotation speed')
+        speed_row.addWidget(speed_icon)
         self.base_speed = QSlider(Qt.Horizontal)
         self.base_speed.setRange(
             round(BASE_SPEED_MIN * 100), round(BASE_SPEED_MAX * 100))
         self.base_speed.setValue(50)
+        self.base_speed.setToolTip('Rotation speed')
         self.base_speed.valueChanged.connect(self._update_speed_label)
         speed_row.addWidget(self.base_speed, 1)
         self.speed_label = QLabel('0.50')
@@ -145,10 +159,10 @@ class ArmControlWindow(QMainWindow):
         layout.addLayout(speed_row)
 
         buttons = QHBoxLayout()
-        left = QPushButton('Hold to rotate left')
-        stop = QPushButton('STOP BASE')
-        stop.setObjectName('stopButton')
-        right = QPushButton('Hold to rotate right')
+        # Spatial order: counter-clockwise on the left, clockwise on the right.
+        left = self._icon_button('↺', 'Hold to rotate left (counter-clockwise)')
+        stop = self._icon_button('■', 'Stop base', 'stopButton')
+        right = self._icon_button('↻', 'Hold to rotate right (clockwise)')
 
         left.pressed.connect(lambda: self._start_base(1.0))
         left.released.connect(self._stop_base)
@@ -161,22 +175,23 @@ class ArmControlWindow(QMainWindow):
         buttons.addWidget(right)
         layout.addLayout(buttons)
 
-        hint = QLabel('The base stops when a direction button is released.')
+        hint = QLabel('Hold ↺ / ↻ to spin — releasing stops the base.')
         hint.setObjectName('hint')
         layout.addWidget(hint)
         return group
 
     def _build_target_group(self):
-        group = QGroupBox('End-effector target')
-        layout = QGridLayout(group)
+        group = QGroupBox('End-effector target  ✛')
+        layout = QVBoxLayout(group)
 
-        start_reach, start_height = ik.forward(
-            ik.START_SHOULDER, ik.START_ELBOW, ik.START_WRIST)
+        start_reach, start_height = self._start_target()
 
         self.reach = self._distance_spinbox(
             REACH_MIN, REACH_MAX, start_reach)
+        self.reach.setToolTip('Reach from base axis')
         self.height = self._distance_spinbox(
             HEIGHT_MIN, HEIGHT_MAX, start_height)
+        self.height.setToolTip('Tip height above ground')
         self.azimuth = QDoubleSpinBox()
         self.azimuth.setDecimals(0)
         self.azimuth.setSingleStep(5.0)
@@ -184,68 +199,100 @@ class ArmControlWindow(QMainWindow):
         self.azimuth.setValue(0.0)
         self.azimuth.setSuffix('°')
         self.azimuth.setKeyboardTracking(False)
+        self.azimuth.setToolTip('Base azimuth (yaw) of the target')
 
-        layout.addWidget(QLabel('Base azimuth'), 0, 0)
-        layout.addWidget(self.azimuth, 0, 1)
-        layout.addWidget(QLabel('Reach from base'), 1, 0)
-        layout.addWidget(self.reach, 1, 1)
-        layout.addWidget(QLabel('Height'), 2, 0)
-        layout.addWidget(self.height, 2, 1)
+        fields = QGridLayout()
+        for row, (symbol, tip, widget) in enumerate((
+            ('∠', 'Base azimuth (yaw)', self.azimuth),
+            ('⟷', 'Reach from base axis', self.reach),
+            ('↕', 'Height above ground', self.height),
+        )):
+            icon = QLabel(symbol)
+            icon.setObjectName('fieldIcon')
+            icon.setToolTip(tip)
+            icon.setAlignment(Qt.AlignCenter)
+            fields.addWidget(icon, row, 0)
+            fields.addWidget(widget, row, 1)
+        fields.setColumnStretch(1, 1)
+        layout.addLayout(fields)
 
-        reach_less = QPushButton('Reach −5 mm')
-        reach_more = QPushButton('Reach +5 mm')
-        lower = QPushButton('Lower 5 mm')
-        raise_arm = QPushButton('Raise 5 mm')
+        # Jog pad laid out the way the arm moves: up/down = height,
+        # left/right = reach, centre = return to the safe start pose.
+        pad = QGridLayout()
+        pad.setSpacing(6)
+        raise_arm = self._icon_button('▲', f'Raise {TARGET_STEP * 1000:.0f} mm')
+        lower = self._icon_button('▼', f'Lower {TARGET_STEP * 1000:.0f} mm')
+        reach_less = self._icon_button(
+            '◀', f'Reach in {TARGET_STEP * 1000:.0f} mm')
+        reach_more = self._icon_button(
+            '▶', f'Reach out {TARGET_STEP * 1000:.0f} mm')
+        safe_start = self._icon_button('⌂', 'Go to safe start target')
 
+        raise_arm.clicked.connect(lambda: self._jog_target(0.0, TARGET_STEP))
+        lower.clicked.connect(lambda: self._jog_target(0.0, -TARGET_STEP))
         reach_less.clicked.connect(lambda: self._jog_target(-TARGET_STEP, 0.0))
         reach_more.clicked.connect(lambda: self._jog_target(TARGET_STEP, 0.0))
-        lower.clicked.connect(lambda: self._jog_target(0.0, -TARGET_STEP))
-        raise_arm.clicked.connect(lambda: self._jog_target(0.0, TARGET_STEP))
-
-        layout.addWidget(reach_less, 3, 0)
-        layout.addWidget(reach_more, 3, 1)
-        layout.addWidget(lower, 4, 0)
-        layout.addWidget(raise_arm, 4, 1)
-
-        safe_start = QPushButton('Safe start target')
         safe_start.clicked.connect(self._send_safe_start)
-        move = QPushButton('Move to target')
-        move.setObjectName('primaryButton')
+
+        pad.addWidget(raise_arm, 0, 1)
+        pad.addWidget(reach_less, 1, 0)
+        pad.addWidget(safe_start, 1, 1)
+        pad.addWidget(reach_more, 1, 2)
+        pad.addWidget(lower, 2, 1)
+
+        pad_row = QHBoxLayout()
+        pad_row.addStretch(1)
+        pad_row.addLayout(pad)
+        pad_row.addStretch(1)
+        layout.addLayout(pad_row)
+
+        move = self._icon_button('➤  Move', 'Send the target to the arm',
+                                 'primaryButton')
+        layout.addWidget(move)
         move.clicked.connect(self._send_target)
-        layout.addWidget(safe_start, 5, 0)
-        layout.addWidget(move, 5, 1)
 
         polar_hint = QLabel(
-            'Cylindrical target (azimuth, reach, height). Simulation solves '
-            'azimuth as J1; physical J1 remains manual without an encoder.')
+            '∠ azimuth · ⟷ reach · ↕ height. Simulation solves ∠ as J1; '
+            'physical J1 stays manual without an encoder.')
         polar_hint.setObjectName('hint')
         polar_hint.setWordWrap(True)
-        layout.addWidget(polar_hint, 6, 0, 1, 2)
+        layout.addWidget(polar_hint)
         return group
 
     def _build_gripper_group(self):
-        group = QGroupBox('Gripper')
+        group = QGroupBox('Gripper  ⊑⊒')
         layout = QVBoxLayout(group)
 
+        # Slider runs left (open) to right (closed), so the end labels show the
+        # finger pair spread apart and pressed together.
         position_row = QHBoxLayout()
-        position_row.addWidget(QLabel('Open'))
+        open_icon = QLabel('◀   ▶')
+        open_icon.setObjectName('fieldIcon')
+        open_icon.setToolTip('Open')
+        position_row.addWidget(open_icon)
         self.gripper = QSlider(Qt.Horizontal)
         self.gripper.setRange(0, 100)
         self.gripper.setValue(0)
+        self.gripper.setToolTip('Gripper position: left open, right closed')
         self.gripper.valueChanged.connect(self._update_gripper_label)
         self.gripper.sliderReleased.connect(self._send_gripper)
         position_row.addWidget(self.gripper, 1)
-        position_row.addWidget(QLabel('Closed'))
+        closed_icon = QLabel('▶ ◀')
+        closed_icon.setObjectName('fieldIcon')
+        closed_icon.setToolTip('Closed')
+        position_row.addWidget(closed_icon)
         self.gripper_label = QLabel('0%')
         self.gripper_label.setMinimumWidth(38)
         position_row.addWidget(self.gripper_label)
         layout.addLayout(position_row)
 
         buttons = QHBoxLayout()
-        open_button = QPushButton('Open')
-        apply_button = QPushButton('Set position')
-        apply_button.setObjectName('primaryButton')
-        close_button = QPushButton('Close')
+        open_button = self._icon_button('◀   ▶', 'Open fully')
+        # '✔' measures ~82 ink px at 24 px vs '✓' at 53 (offscreen render
+        # check), so it stays legible at button size.
+        apply_button = self._icon_button(
+            '✔', 'Send the slider position', 'primaryIconButton')
+        close_button = self._icon_button('▶ ◀', 'Close fully')
         open_button.clicked.connect(lambda: self._set_gripper(0))
         apply_button.clicked.connect(self._send_gripper)
         close_button.clicked.connect(lambda: self._set_gripper(100))
@@ -265,6 +312,19 @@ class ArmControlWindow(QMainWindow):
         spin.setSuffix(' m')
         spin.setKeyboardTracking(False)
         return spin
+
+    @staticmethod
+    def _start_target():
+        """Safe-start tip target, snapped to a value the spinboxes can hold.
+
+        The raw FK of the start pose sits on the workspace boundary, so the
+        3-decimal spinbox rounding can land outside it. Snapping keeps the
+        displayed default sendable.
+        """
+        reach, height = ik.forward(
+            ik.START_SHOULDER, ik.START_ELBOW, ik.START_WRIST)
+        snapped = ik.nearest_feasible(reach, height, step=TARGET_STEP_MM)
+        return snapped if snapped is not None else (reach, height)
 
     def _update_speed_label(self, value):
         self.speed_label.setText(f'{value / 100.0:.2f}')
@@ -305,8 +365,7 @@ class ArmControlWindow(QMainWindow):
             f'reach {reach:.3f} m, height {height:.3f} m')
 
     def _send_safe_start(self):
-        reach, height = ik.forward(
-            ik.START_SHOULDER, ik.START_ELBOW, ik.START_WRIST)
+        reach, height = self._start_target()
         self.azimuth.setValue(0.0)
         self.reach.setValue(reach)
         self.height.setValue(height)
@@ -416,6 +475,33 @@ class ArmControlWindow(QMainWindow):
                 background: #a6313c;
                 border-color: #d64b59;
                 font-weight: 700;
+            }
+            QPushButton#iconButton, QPushButton#stopButton {
+                font-size: 20px;
+                min-width: 62px;
+                min-height: 46px;
+                padding: 0;
+            }
+            QPushButton#primaryButton {
+                font-size: 16px;
+                min-height: 42px;
+            }
+            QPushButton#primaryIconButton {
+                background: #2774c7;
+                border: 1px solid #3f8de0;
+                border-radius: 6px;
+                font-size: 24px;
+                font-weight: 700;
+                min-width: 62px;
+                min-height: 46px;
+                padding: 0;
+            }
+            QPushButton#primaryIconButton:hover { background: #3184dc; }
+            QPushButton#primaryIconButton:pressed { background: #1f5fa6; }
+            QLabel#fieldIcon {
+                font-size: 17px;
+                color: #9ba8b4;
+                min-width: 30px;
             }
             QDoubleSpinBox {
                 background: #10141a;

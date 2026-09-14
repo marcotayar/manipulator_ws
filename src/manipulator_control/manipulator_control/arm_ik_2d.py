@@ -12,7 +12,7 @@ Geometry (y = vertical, x = horizontal, base yaw handled separately):
   All joints: +/- 90 deg (pi/2)
   Constraint: tip y >= 0
 """
-from math import atan2, sqrt, acos, pi, cos, sin, radians
+from math import atan2, sqrt, acos, pi, cos, sin, radians, log10
 
 # Geometry
 BASE_X = 0.0
@@ -39,6 +39,11 @@ SH_MIN, SH_MAX = radians(10), radians(90)
 EL_MIN, EL_MAX = radians(-80), radians(80)
 WR_MIN, WR_MAX = radians(-80), radians(80)
 
+# Joint-limit comparison tolerance. The safe start pose sits exactly on
+# SH_MAX and WR_MIN, and the FK->IK round trip lands a few ulps outside them.
+# Without this slack the solver rejects its own start pose.
+LIMIT_EPS = 1e-6
+
 # Safe start pose — MUST match esp32_microros.ino setup(). Gripper hovers above
 # ground, low shoulder load. Single source of truth for all nodes.
 START_SHOULDER = radians(90)
@@ -58,6 +63,13 @@ ACTION_SPACE = (
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def _in_limits(t1, t2, t3):
+    """Joint limits with LIMIT_EPS slack, so on-limit poses stay solvable."""
+    return (SH_MIN - LIMIT_EPS <= t1 <= SH_MAX + LIMIT_EPS and
+            EL_MIN - LIMIT_EPS <= t2 <= EL_MAX + LIMIT_EPS and
+            WR_MIN - LIMIT_EPS <= t3 <= WR_MAX + LIMIT_EPS)
 
 
 def cartesian_to_cylindrical(x, y, z):
@@ -106,16 +118,12 @@ def solve_fixed_phi(tip_x, tip_y, phi):
             continue
         t1, t2 = sol
         t3 = phi - (t1 + t2)
-        if not (SH_MIN <= t1 <= SH_MAX):
-            continue
-        if not (EL_MIN <= t2 <= EL_MAX):
-            continue
-        if not (WR_MIN <= t3 <= WR_MAX):
+        if not _in_limits(t1, t2, t3):
             continue
         return {
-            'shoulder': t1,
-            'elbow': t2,
-            'wrist': t3,
+            'shoulder': clamp(t1, SH_MIN, SH_MAX),
+            'elbow': clamp(t2, EL_MIN, EL_MAX),
+            'wrist': clamp(t3, WR_MIN, WR_MAX),
             'phi': phi,
             'elbow_up': elbow_up,
         }
@@ -139,16 +147,12 @@ def solve_fixed_phi_all(tip_x, tip_y, phi):
             continue
         t1, t2 = sol
         t3 = phi - (t1 + t2)
-        if not (SH_MIN <= t1 <= SH_MAX):
-            continue
-        if not (EL_MIN <= t2 <= EL_MAX):
-            continue
-        if not (WR_MIN <= t3 <= WR_MAX):
+        if not _in_limits(t1, t2, t3):
             continue
         out.append({
-            'shoulder': t1,
-            'elbow': t2,
-            'wrist': t3,
+            'shoulder': clamp(t1, SH_MIN, SH_MAX),
+            'elbow': clamp(t2, EL_MIN, EL_MAX),
+            'wrist': clamp(t3, WR_MIN, WR_MAX),
             'phi': phi,
             'elbow_up': elbow_up,
         })
@@ -228,3 +232,33 @@ def forward(shoulder, elbow, wrist):
     x += L3 * cos(shoulder + elbow + wrist)
     y += L3 * sin(shoulder + elbow + wrist)
     return x, y
+
+
+def nearest_feasible(reach, height, step=0.001, max_rings=40):
+    """Snap a planar (reach, height) target to the nearest solvable grid point.
+
+    The safe start pose sits on the workspace boundary, so a UI that displays
+    millimetre precision can round it to an unsolvable point. This returns the
+    closest point on the ``step`` grid that ``solve`` accepts, or ``None``.
+    """
+    digits = max(0, round(-log10(step)))
+    base_r = round(reach, digits)
+    base_h = round(height, digits)
+
+    best = None
+    best_d2 = float('inf')
+    for ring in range(max_rings + 1):
+        for i in range(-ring, ring + 1):
+            for j in range(-ring, ring + 1):
+                if max(abs(i), abs(j)) != ring:
+                    continue          # only the new ring, inner ones are done
+                r = round(base_r + i * step, digits)
+                h = round(base_h + j * step, digits)
+                if h < GROUND_CLEAR or solve(r, h) is None:
+                    continue
+                d2 = (r - reach) ** 2 + (h - height) ** 2
+                if d2 < best_d2:
+                    best_d2, best = d2, (r, h)
+        if best is not None:
+            return best
+    return None

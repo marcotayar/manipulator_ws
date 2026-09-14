@@ -5,8 +5,10 @@ Geometric inverse kinematics for RRRR manipulator.
 Uses tf2 to read actual EE position from the URDF TF tree (ground truth),
 so the trajectory marker always matches the real robot model.
 
-IK is solved geometrically in the vertical plane.
-Gripper is constrained to point straight DOWN.
+IK is delegated to manipulator_control.arm_ik_2d, the single source of truth
+for arm geometry, joint limits, and the EE approach-angle search (straight
+down preferred, not enforced), so the simulation and the hardware commander
+accept exactly the same targets.
 Returns None (no motion) for any target outside the reachable workspace
 or joint limits.
 """
@@ -15,107 +17,62 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Float32
 from builtin_interfaces.msg import Duration
-from math import atan2, sqrt, acos, pi, cos, sin
+from math import sqrt, pi
+
+from manipulator_control import arm_ik_2d as ik2
 
 import tf2_ros
 
 
-# Robot dimensions — must match URDF (manipulator.urdf.xacro)
-BASE_HEIGHT = 0.09   # base_link(0.07) + turntable(0.02)
-L1 = 0.10            # shoulder → elbow
-L2 = 0.09            # elbow → wrist
+# Only the gripper offset is needed locally (TF-based EE tip reconstruction).
+# All arm geometry and joint limits live in arm_ik_2d — single source of truth.
 L_GRIP = 0.16        # wrist → EE tip: gripper_base(0.03) + fingers(0.13)
 
-# Joint limits (rad) — must match URDF
-J2_LIMIT = pi / 2
-J3_LIMIT = pi / 2
-J4_LIMIT = pi / 2
 
-# Trajectory interpolation
+# Simulation loop
+DT = 0.02          # timer period (s) — 50 Hz
 N_STEPS = 50
-STEP_DELAY = 0.03  # seconds between steps
+STEP_DELAY = 0.03  # seconds between interpolation steps
 
+# /base_cmd is normalized (-1..1); this is the rad/s it maps to at full
+# command. Matches BASE_VEL in manipulator_control.keyboard_teleop so both
+# sim drivers spin the turntable at the same rate.
+BASE_MAX_RADPS = 1.5
 
-def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
+# Finger travel. Measured from the URDF TF tree: joint value 0.0 puts the
+# fingers at their 0.030 m nominal gap (CLOSED) and -grip_upper swings both
+# outward to 0.090 m (OPEN). The mirrored `axis` signs keep the pair
+# symmetric, so both joints take the same value.
+GRIP_TRAVEL = 0.03
 
 
 def solve_ik(x, y, z, logger=None):
-    """
-    Solve IK for target (x, y, z) in world frame.
-    Gripper points straight DOWN.
+    """Solve IK for target (x, y, z) in world frame.
 
-    URDF convention: at q=[0,0,0,0] all links point UP (+Z).
-    J2/J3/J4 rotate about the local Y axis; positive rotation takes +Z toward +X.
-    So for a link of length L at angle q from vertical:
-      horizontal component = L * sin(q)
-      vertical component   = L * cos(q)
+    Delegates to ``manipulator_control.arm_ik_2d`` so the simulation and the
+    hardware commander share one workspace and one set of joint limits. That
+    solver works in the "angle from horizontal" convention with a searched EE
+    approach angle; the URDF measures every joint from +Z (all links up at
+    q=0, positive rotation taking +Z toward +X), hence the conversion below.
 
     Returns (theta1, q2, q3, q4) or None if unreachable.
     """
-    if z < 0:
-        if logger:
-            logger.warn(f'Target below ground: z={z:.3f}')
-        return None
-
-    # Cylindrical decomposition: J1 handles azimuth while J2-J4 solve the
-    # radius/height cross-section.
-    theta1 = atan2(y, x)
-
-    # Horizontal distance from base axis to target
-    r_target = sqrt(x * x + y * y)
-
-    # Wrist must be directly above target (gripper hangs straight down)
-    r_w = r_target
-    h_w = (z + L_GRIP) - BASE_HEIGHT   # wrist height relative to shoulder
-
-    d_sq = r_w * r_w + h_w * h_w
-    d = sqrt(d_sq)
-
-    if d >= L1 + L2:
-        if logger:
-            logger.warn(f'Out of reach: d={d:.3f} m, max={L1+L2:.3f} m')
-        return None
-    if d <= abs(L1 - L2):
-        if logger:
-            logger.warn(f'Too close to shoulder: d={d:.3f} m, min={abs(L1-L2):.3f} m')
-        return None
-
-    cos_q3 = clamp((d_sq - L1 * L1 - L2 * L2) / (2 * L1 * L2), -1.0, 1.0)
-    alpha = atan2(r_w, h_w)   # angle from +Z toward +X of shoulder→wrist vector
-
-    best = None
-    best_cost = float('inf')
-
-    for q3_val in [acos(cos_q3), -acos(cos_q3)]:
-        beta = atan2(L2 * sin(q3_val), L1 + L2 * cos(q3_val))
-        q2_val = alpha - beta
-        q4_val = pi - q2_val - q3_val   # gripper points down constraint
-
-        if abs(q2_val) > J2_LIMIT:
-            continue
-        if abs(q3_val) > J3_LIMIT:
-            continue
-        if abs(q4_val) > J4_LIMIT:
-            continue
-
-        cost = abs(q2_val) + abs(q3_val) + abs(q4_val)
-        if cost < best_cost:
-            best_cost = cost
-            best = (q2_val, q3_val, q4_val)
-
-    if best is None:
+    solution = ik2.solve_cartesian(x, y, z)
+    if solution is None:
         if logger:
             logger.warn(
-                f'No configuration within joint limits for '
-                f'({x:.3f}, {y:.3f}, {z:.3f})'
+                f'Unreachable target ({x:.3f}, {y:.3f}, {z:.3f}) — '
+                'outside the shared arm_ik_2d workspace.'
             )
         return None
 
-    q2, q3, q4 = best
-    return clamp(theta1, -pi, pi), q2, q3, q4
+    # angle-from-horizontal (arm_ik_2d) -> angle-from-+Z (URDF)
+    q2 = pi / 2 - solution['shoulder']
+    q3 = -solution['elbow']
+    q4 = -solution['wrist']
+    return solution['base_yaw'], q2, q3, q4
 
 
 class IKNode(Node):
@@ -125,6 +82,9 @@ class IKNode(Node):
         self.sub = self.create_subscription(
             Point, '/target_pose', self.target_cb, 10
         )
+        self.create_subscription(Float32, '/base_cmd', self.base_cmd_cb, 10)
+        self.create_subscription(
+            Float32, '/gripper_cmd', self.gripper_cmd_cb, 10)
         self.pub = self.create_publisher(JointState, '/joint_states', 10)
         self.marker_pub = self.create_publisher(
             Marker, '/ee_trajectory', 10
@@ -139,20 +99,32 @@ class IKNode(Node):
         self.move_start_q = [0.0, 0.0, 0.0, 0.0]
         self.is_moving = False
         self.move_progress = 0.0
-        self.gripper_pos = 0.0
+        # Start open, matching arm_commander's initial gripper command of 0.0.
+        self.gripper_pos = -GRIP_TRAVEL
+        self.base_cmd = 0.0      # normalized -1..1, integrated into joint1
         self.trajectory_points = []
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.timer = self.create_timer(0.02, self.timer_cb)
+        self.timer = self.create_timer(DT, self.timer_cb)
 
         self.get_logger().info(
             'IK node ready. Publish a Point to /target_pose.\n'
-            '  Gripper points DOWN at target.\n'
-            f'  Reachable annulus: {abs(L1-L2):.3f} m < r < {L1+L2:.3f} m '
-            f'(horizontal distance from base axis, at ground level).'
+            '  EE approach angle is searched, straight down preferred.\n'
+            '  Shared workspace/limits with arm_commander (arm_ik_2d): '
+            f'reach <= {ik2.L1 + ik2.L2 + ik2.L3:.3f} m, tip height >= '
+            f'{ik2.GROUND_CLEAR:.3f} m.'
         )
+
+    def base_cmd_cb(self, msg: Float32):
+        """Normalized base velocity (-1..1), as published by the Qt panel."""
+        self.base_cmd = max(-1.0, min(1.0, float(msg.data)))
+
+    def gripper_cmd_cb(self, msg: Float32):
+        """Gripper position: 0.0 open .. 1.0 closed."""
+        closure = max(0.0, min(1.0, float(msg.data)))
+        self.gripper_pos = -GRIP_TRAVEL * (1.0 - closure)
 
     def get_ee_position_from_tf(self):
         """Compute EE tip position from the TF tree (ground truth)."""
@@ -199,9 +171,18 @@ class IKNode(Node):
         self.check_pending = False
 
     def timer_cb(self):
+        # Base is a continuous-rotation servo: velocity integrates into the
+        # joint1 angle. Shift the interpolation endpoints by the same delta so
+        # an in-flight IK move doesn't undo the operator's jog.
+        if self.base_cmd != 0.0:
+            delta = self.base_cmd * BASE_MAX_RADPS * DT
+            self.current_q[0] += delta
+            self.target_q[0] += delta
+            self.move_start_q[0] += delta
+
         if self.is_moving:
             duration = N_STEPS * STEP_DELAY
-            step = 0.02 / duration
+            step = DT / duration
             self.move_progress += step
 
             if self.move_progress >= 1.0:

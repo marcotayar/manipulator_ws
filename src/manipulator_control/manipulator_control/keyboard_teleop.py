@@ -9,7 +9,7 @@ Controls:
   e/d    -> J3 (elbow)       +/-
   r/f    -> J4 (wrist)       +/-
   t/g    -> gripper close/open
-  z      -> home (all zeros, base stops)
+  z      -> home (arm to zero, gripper open, base stops)
   x      -> quit
 """
 import sys
@@ -27,13 +27,18 @@ BASE_VEL = 1.5     # rad/s for base spin
 STEP_ROT = 0.05    # ~3 deg per keypress for position joints
 STEP_LIN = 0.002   # 2 mm per keypress for gripper
 
+# Finger convention (matches URDF finger_*_joint limits and ik_node):
+#   0.0 = closed (fingers together), -0.03 = fully open.
+FINGER_JOINTS = ('finger_left_joint', 'finger_right_joint')
+GRIP_OPEN = -0.03
+
 # Position limits for the non-continuous joints
 JOINT_LIMITS = {
     'joint2': (-pi/2, pi/2),
     'joint3': (-pi/2, pi/2),
     'joint4': (-pi/2, pi/2),
-    'finger_left_joint':  (-0.03, 0.0),
-    'finger_right_joint': (-0.03, 0.0),
+    'finger_left_joint':  (GRIP_OPEN, 0.0),
+    'finger_right_joint': (GRIP_OPEN, 0.0),
 }
 
 HELP = """
@@ -46,7 +51,7 @@ HELP = """
 ║  e / d    →  J3 elbow          +/-     ║
 ║  r / f    →  J4 wrist          +/-     ║
 ║  t / g    →  gripper close / open      ║
-║  z        →  home (all zeros)          ║
+║  z        →  home (arm zero, grip open)║
 ║  x        →  quit                      ║
 ╚════════════════════════════════════════╝
 """
@@ -77,6 +82,10 @@ class KeyboardTeleop(Node):
             'finger_left_joint', 'finger_right_joint',
         ]
         self.positions = {name: 0.0 for name in self.joint_names}
+        # Fingers: 0.0 is closed, GRIP_OPEN is fully open. Start open so the
+        # sim matches arm_commander's initial gripper command of 0.0.
+        for fn in FINGER_JOINTS:
+            self.positions[fn] = GRIP_OPEN
         self.base_vel = 0.0  # rad/s — integrated each timer tick
 
         self.create_subscription(Float32, '/base_cmd', self._base_cmd_cb, 10)
@@ -108,6 +117,8 @@ class KeyboardTeleop(Node):
                 elif key == 'z':
                     for name in self.joint_names:
                         self.positions[name] = 0.0
+                    for fn in FINGER_JOINTS:
+                        self.positions[fn] = GRIP_OPEN
                     self.base_vel = 0.0
                     self.get_logger().info('Home position')
 
@@ -131,8 +142,10 @@ class KeyboardTeleop(Node):
                         'd': ('joint3', -STEP_ROT),
                         'r': ('joint4',  STEP_ROT),
                         'f': ('joint4', -STEP_ROT),
-                        't': ('gripper', -STEP_LIN),
-                        'g': ('gripper',  STEP_LIN),
+                        # Finger joints: 0.0 = closed, -0.03 = open (see URDF
+                        # finger_*_joint limits), so closing moves toward 0.
+                        't': ('gripper',  STEP_LIN),
+                        'g': ('gripper', -STEP_LIN),
                     }
                     joint, delta = key_map[key]
                     if joint == 'gripper':
