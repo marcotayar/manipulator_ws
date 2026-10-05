@@ -33,6 +33,8 @@ from geometry_msgs.msg import Point
 from math import degrees
 
 from manipulator_control import arm_ik_2d as ik
+from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
+from std_msgs.msg import Bool
 
 
 class ArmCommander(Node):
@@ -47,6 +49,7 @@ class ArmCommander(Node):
         self.wrist = ik.START_WRIST
         self.gripper = 0.0             # open
         self.target_base_yaw = 0.0     # reference only; physical J1 has no encoder
+        self.estop = False
 
         # Publisher to ESP32
         self.pub = self.create_publisher(Float32MultiArray, '/arm_command', 10)
@@ -55,6 +58,7 @@ class ArmCommander(Node):
         self.create_subscription(Point, '/target_pose', self.target_cb, 10)
         self.create_subscription(Float32, '/base_cmd', self.base_cb, 10)
         self.create_subscription(Float32, '/gripper_cmd', self.gripper_cb, 10)
+        self.create_subscription(Bool, ESTOP_TOPIC, self.estop_cb, ESTOP_QOS)
 
         # Publish at 50 Hz
         self.timer = self.create_timer(0.02, self.publish_cmd)
@@ -69,6 +73,8 @@ class ArmCommander(Node):
         )
 
     def target_cb(self, msg: Point):
+        if self.estop:
+            return
         prev = {'shoulder': self.shoulder,
                 'elbow': self.elbow,
                 'wrist': self.wrist}
@@ -95,11 +101,21 @@ class ArmCommander(Node):
             'align physical base manually'
         )
 
+    def estop_cb(self, msg: Bool):
+        self.estop = bool(msg.data)
+        if self.estop:
+            self.base_vel = 0.0
+        self.get_logger().warn(
+            'EMERGENCY STOP engaged: base stopped, arm frozen.' if self.estop
+            else 'Emergency stop released.')
+
     def base_cb(self, msg: Float32):
-        self.base_vel = max(-1.0, min(1.0, msg.data))
+        if not self.estop:
+            self.base_vel = max(-1.0, min(1.0, msg.data))
 
     def gripper_cb(self, msg: Float32):
-        self.gripper = max(0.0, min(1.0, msg.data))
+        if not self.estop:
+            self.gripper = max(0.0, min(1.0, msg.data))
 
     def publish_cmd(self):
         msg = Float32MultiArray()

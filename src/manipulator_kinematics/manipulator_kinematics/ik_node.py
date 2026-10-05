@@ -17,11 +17,12 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker
-from std_msgs.msg import ColorRGBA, Float32
+from std_msgs.msg import Bool, ColorRGBA, Float32
 from builtin_interfaces.msg import Duration
 from math import sqrt, pi
 
 from manipulator_control import arm_ik_2d as ik2
+from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
 
 import tf2_ros
 
@@ -85,6 +86,7 @@ class IKNode(Node):
         self.create_subscription(Float32, '/base_cmd', self.base_cmd_cb, 10)
         self.create_subscription(
             Float32, '/gripper_cmd', self.gripper_cmd_cb, 10)
+        self.create_subscription(Bool, ESTOP_TOPIC, self.estop_cb, ESTOP_QOS)
         self.pub = self.create_publisher(JointState, '/joint_states', 10)
         self.marker_pub = self.create_publisher(
             Marker, '/ee_trajectory', 10
@@ -101,6 +103,7 @@ class IKNode(Node):
         self.move_progress = 0.0
         # Start open, matching arm_commander's initial gripper command of 0.0.
         self.gripper_pos = -GRIP_TRAVEL
+        self.estop = False
         self.base_cmd = 0.0      # normalized -1..1, integrated into joint1
         self.trajectory_points = []
 
@@ -117,12 +120,22 @@ class IKNode(Node):
             f'{ik2.GROUND_CLEAR:.3f} m.'
         )
 
+    def estop_cb(self, msg: Bool):
+        """Latched stop: freeze in place, ignore commands until released."""
+        self.estop = bool(msg.data)
+        if self.estop:
+            self.base_cmd = 0.0
+            self.is_moving = False
+
     def base_cmd_cb(self, msg: Float32):
         """Normalized base velocity (-1..1), as published by the Qt panel."""
-        self.base_cmd = max(-1.0, min(1.0, float(msg.data)))
+        if not self.estop:
+            self.base_cmd = max(-1.0, min(1.0, float(msg.data)))
 
     def gripper_cmd_cb(self, msg: Float32):
         """Gripper position: 0.0 open .. 1.0 closed."""
+        if self.estop:
+            return
         closure = max(0.0, min(1.0, float(msg.data)))
         self.gripper_pos = -GRIP_TRAVEL * (1.0 - closure)
 
@@ -152,6 +165,8 @@ class IKNode(Node):
             return None
 
     def target_cb(self, msg: Point):
+        if self.estop:
+            return
         target = solve_ik(msg.x, msg.y, msg.z, self.get_logger())
         if target is None:
             return  # unreachable — don't move
