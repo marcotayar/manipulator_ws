@@ -147,37 +147,57 @@ ros2 run manipulator_control base_gripper_teleop
 
 See [Hardware control](#hardware-control) below.
 
-### 6. Qt hardware control panel
+### 6. Qt panel + RViz: simulation or real hardware
 
-The Qt panel controls base rotation, cylindrical target coordinates
-(azimuth/reach/height), and the positional gripper through `arm_commander`:
-
-```bash
-ros2 launch manipulator_control control_gui.launch.py
-```
-
-For the full hardware stack (RViz, click-to-target, commander, and the Qt
-panel), run:
+Two launches, each starting RViz, click-to-target, `arm_commander` and the Qt
+panel. The panel controls base rotation, cylindrical target coordinates
+(azimuth/reach/height) and the positional gripper, and plots joint angles
+(degrees, last 20 s): commanded shoulder/elbow/wrist (dashed), shoulder
+potentiometer (`/shoulder_feedback`) and encoder angles (`/joint_states`).
+Dotted lines are the joint limits; click a legend entry to hide/show a series.
+A warning appears when a joint is within 5° of a limit.
 
 ```bash
-ros2 launch manipulator_control hardware.launch.py
+ros2 launch manipulator_control sim.launch.py             # test IK, kinematic plant
+ros2 launch manipulator_control sim.launch.py plant:=pid  # closed-loop PID plant (section 7)
+ros2 launch manipulator_control hardware.launch.py        # real arm
 ```
+
+On hardware, RViz mirrors the arm through `shoulder_feedback_bridge`: the
+shoulder follows the potentiometer (falling back to the command if the pot is
+silent for 1 s); elbow, wrist and gripper show the *commanded* values, because
+they have no sensors; the base is not shown (no encoder). The plots only use
+real measurements.
+
+**Emergency stop.** The red button publishes a latched `/estop`
+(`std_msgs/Bool`). While engaged, `arm_commander` and `ik_node` stop the base,
+freeze the arm at its last command and ignore new targets, base and gripper
+commands; the panel's controls are disabled. Click again to release. It stops
+only what goes through these nodes; it does not cut servo power.
 
 Hold a base direction button to rotate; releasing it sends a stop command.
 The reach/height jog buttons move in 5 mm steps, and invalid targets are
 rejected in the panel. The status line turns green when `/arm_command`
 feedback is being received from `arm_commander`.
 
-### 7. Closed-loop PID numerical simulation
-
-Runs the same Qt panel and `/arm_command` interface as deployment, but replaces
-the ESP32/servos with a 200 Hz numerical plant. J2-J4 use position PID with
-gravity feedforward; J1 uses velocity PID; the gripper uses position PID.
-`/joint_states` contains simulated encoder measurements, not copied commands:
+Analysis window (read-only, run next to either launch):
 
 ```bash
-ros2 launch manipulator_control pid_sim.launch.py
+ros2 launch manipulator_control analysis.launch.py
 ```
+
+It plots tracking error (command − measured, per joint) and the gripper and
+base signals, with pause/resume, clear, a 10/20/60 s window and CSV export of
+the full recording (up to one hour). Without an elbow/wrist sensor on hardware
+only the shoulder error is available.
+
+### 7. Closed-loop PID numerical simulation
+
+`sim.launch.py plant:=pid` runs the same panel and `/arm_command`
+interface as deployment, but replaces
+the ESP32/servos with a 200 Hz numerical plant. J2-J4 use position PID with
+gravity feedforward; J1 uses velocity PID; the gripper uses position PID.
+`/joint_states` contains simulated encoder measurements, not copied commands.
 
 Desired state is published on `/joint_setpoint`. `/pid_diagnostics` contains
 five errors followed by five controller efforts. Publish five additive efforts
@@ -203,6 +223,7 @@ those gains on hardware.
 | `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm`, `arm_control_gui` | `ik_node`, `arm_commander` |
 | `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander`, `ik_node` |
 | `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_gripper_teleop` | `arm_commander`, `ik_node` |
+| `/estop` | `std_msgs/Bool` (latched) | `arm_control_gui` | `arm_commander`, `ik_node` |
 | `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_to_arm` |
 | `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS), `pid_sim` |
 | `/pid_diagnostics` | `std_msgs/Float32MultiArray` | `pid_sim` | diagnostics/plots |

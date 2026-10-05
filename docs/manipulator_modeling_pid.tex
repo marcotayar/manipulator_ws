@@ -430,7 +430,7 @@ The full simulation launches with:
 \begin{lstlisting}
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch manipulator_control pid_sim.launch.py
+ros2 launch manipulator_control sim.launch.py plant:=pid
 \end{lstlisting}
 This launch runs Qt, \code{arm\_commander}, the PID plant, click-to-target,
 \code{robot\_state\_publisher}, and RViz. It intentionally does not run
