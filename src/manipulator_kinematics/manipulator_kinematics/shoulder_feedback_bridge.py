@@ -3,20 +3,30 @@
 shoulder_feedback_bridge
 ========================
 
-Bridges the ESP32 potentiometer reading (/shoulder_feedback, std_msgs/Float32,
-radians in arm_ik_2d's "angle from horizontal" convention) into /joint_states,
-so RViz mirrors the real shoulder servo position in real time.
+Publishes /joint_states so RViz mirrors the real arm on hardware.
 
-Elbow, wrist and gripper are held at the safe-start pose since only the
-shoulder has a feedback sensor wired up for now.
+  shoulder  measured: /shoulder_feedback (potentiometer, rad, "angle from
+            horizontal" as in arm_ik_2d). Falls back to the commanded value
+            when the pot has been silent for POT_TIMEOUT seconds.
+  elbow, wrist, gripper
+            commanded (/arm_command), open loop: no sensor is wired for them.
+  base      not shown: J1 is a continuous servo with no encoder.
+
+Before the first /arm_command the arm sits at the safe-start pose.
 """
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float32
-from sensor_msgs.msg import JointState
+import time
 from math import pi
 
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32, Float32MultiArray
+
 from manipulator_control import arm_ik_2d as ik
+from manipulator_control.arm_telemetry import ESTIMATE_FRAME
+
+POT_TIMEOUT = 1.0     # s before the commanded shoulder replaces a dead pot
+GRIP_TRAVEL = 0.03    # finger joint: -0.03 open .. 0.0 closed (see ik_node)
 
 
 class ShoulderFeedbackBridge(Node):
@@ -27,29 +37,49 @@ class ShoulderFeedbackBridge(Node):
             'joint1', 'joint2', 'joint3', 'joint4',
             'finger_left_joint', 'finger_right_joint',
         ]
-        # angle-from-horizontal (arm_ik_2d) -> angle-from-+Z (URDF), same
-        # conversion ik_node.py uses for shoulder.
-        self.q2 = pi / 2 - ik.START_SHOULDER
-        self.q3 = -ik.START_ELBOW
-        self.q4 = -ik.START_WRIST
+        # arm_ik_2d (angle from horizontal) -> URDF (angle from +Z).
+        self.shoulder_cmd = ik.START_SHOULDER
+        self.elbow_cmd = ik.START_ELBOW
+        self.wrist_cmd = ik.START_WRIST
+        self.gripper_cmd = 0.0
+        self.pot = None
+        self.pot_time = None
 
         self.create_subscription(
             Float32, '/shoulder_feedback', self._feedback_cb, 10)
+        self.create_subscription(
+            Float32MultiArray, '/arm_command', self._command_cb, 10)
         self.pub = self.create_publisher(JointState, '/joint_states', 10)
         self.timer = self.create_timer(0.05, self._publish_state)
 
         self.get_logger().info(
-            'shoulder_feedback_bridge ready: /shoulder_feedback -> /joint_states')
+            'shoulder_feedback_bridge ready: shoulder from pot, '
+            'elbow/wrist/gripper from /arm_command -> /joint_states')
 
     def _feedback_cb(self, msg: Float32):
-        shoulder_rad = max(ik.SH_MIN, min(ik.SH_MAX, msg.data))
-        self.q2 = pi / 2 - shoulder_rad
+        self.pot = max(ik.SH_MIN, min(ik.SH_MAX, msg.data))
+        self.pot_time = time.monotonic()
+
+    def _command_cb(self, msg: Float32MultiArray):
+        if len(msg.data) >= 5:
+            _, self.shoulder_cmd, self.elbow_cmd, self.wrist_cmd, \
+                self.gripper_cmd = msg.data[:5]
 
     def _publish_state(self):
+        pot_fresh = (self.pot_time is not None
+                     and time.monotonic() - self.pot_time < POT_TIMEOUT)
+        shoulder = self.pot if pot_fresh else self.shoulder_cmd
+        finger = -GRIP_TRAVEL * (1.0 - self.gripper_cmd)
+
         out = JointState()
         out.header.stamp = self.get_clock().now().to_msg()
+        # Tells the GUIs this is an estimate, not an encoder reading.
+        out.header.frame_id = ESTIMATE_FRAME
         out.name = self.joint_names
-        out.position = [0.0, self.q2, self.q3, self.q4, 0.0, 0.0]
+        out.position = [
+            0.0, pi / 2 - shoulder, -self.elbow_cmd, -self.wrist_cmd,
+            finger, finger,
+        ]
         self.pub.publish(out)
 
 
