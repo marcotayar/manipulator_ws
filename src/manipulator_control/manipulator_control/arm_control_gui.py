@@ -9,7 +9,7 @@ The GUI publishes the same high-level topics as the joystick controls. The
 import signal
 import sys
 import time
-from math import cos, radians, sin
+from math import cos, degrees, radians, sin
 
 import rclpy
 from geometry_msgs.msg import Point
@@ -56,14 +56,22 @@ class ArmControlNode(Node):
         self.gripper_pub = self.create_publisher(Float32, '/gripper_cmd', 10)
         self.create_subscription(
             Float32MultiArray, '/arm_command', self._command_cb, 10)
+        self.create_subscription(
+            Float32, '/shoulder_feedback', self._feedback_cb, 10)
 
         self.last_command = None
         self.last_command_time = None
+        self.last_feedback = None
+        self.last_feedback_time = None
 
     def _command_cb(self, msg: Float32MultiArray):
         if len(msg.data) >= 5:
             self.last_command = tuple(msg.data[:5])
             self.last_command_time = time.monotonic()
+
+    def _feedback_cb(self, msg: Float32):
+        self.last_feedback = msg.data
+        self.last_feedback_time = time.monotonic()
 
     def send_base(self, velocity: float):
         msg = Float32()
@@ -120,6 +128,10 @@ class ArmControlWindow(QMainWindow):
         self.feedback_label.setWordWrap(True)
         self.feedback_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self.feedback_label)
+
+        self.feedback_pot_label = QLabel('Potentiometer: no /shoulder_feedback yet.')
+        self.feedback_pot_label.setObjectName('feedback')
+        root.addWidget(self.feedback_pot_label)
 
         self.event_label = QLabel('Ready')
         self.event_label.setObjectName('event')
@@ -405,6 +417,16 @@ class ArmControlWindow(QMainWindow):
         else:
             self.status_label.setText('Waiting for /arm_command from arm_commander…')
             self.status_label.setObjectName('statusWaiting')
+
+        fb_age = None
+        if self.node.last_feedback_time is not None:
+            fb_age = time.monotonic() - self.node.last_feedback_time
+        if fb_age is not None and fb_age < 1.0:
+            shoulder_deg = degrees(self.node.last_feedback)
+            self.feedback_pot_label.setText(
+                f'Potentiometer (shoulder): {shoulder_deg:.1f}° live')
+        else:
+            self.feedback_pot_label.setText('Potentiometer: no /shoulder_feedback yet.')
 
         # Qt does not automatically re-polish a widget after its object name changes.
         self.status_label.style().unpolish(self.status_label)
