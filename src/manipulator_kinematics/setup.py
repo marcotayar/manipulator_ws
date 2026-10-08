@@ -16,6 +16,7 @@ setup(
         'console_scripts': [
             'ik_node = manipulator_kinematics.ik_node:main',
             'pid_sim_node = manipulator_kinematics.pid_sim_node:main',
+            'shoulder_feedback_bridge = manipulator_kinematics.shoulder_feedback_bridge:main',
         ],
     },
 )

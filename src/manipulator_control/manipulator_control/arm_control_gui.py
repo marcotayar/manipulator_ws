@@ -6,20 +6,15 @@ The GUI publishes the same high-level topics as the joystick controls. The
 50 Hz command stream sent to the ESP32.
 """
 
-import signal
 import sys
 import time
-from math import cos, radians, sin
+from math import cos, degrees, radians, sin
 
-import rclpy
 from geometry_msgs.msg import Point
-from rclpy.node import Node
-from rclpy.signals import SignalHandlerOptions
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Bool, Float32
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QApplication,
     QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
@@ -33,6 +28,10 @@ from PyQt5.QtWidgets import (
 )
 
 from manipulator_control import arm_ik_2d as ik
+from manipulator_control import qt_ros
+from manipulator_control.arm_telemetry import ArmTelemetry
+from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
+from manipulator_control.signal_plot import SignalPlot
 
 
 BASE_SPEED_MIN = 0.1
@@ -46,7 +45,7 @@ HEIGHT_MIN = 0.00
 HEIGHT_MAX = 0.15
 
 
-class ArmControlNode(Node):
+class ArmControlNode(ArmTelemetry):
     """ROS interface kept separate from the Qt widgets."""
 
     def __init__(self):
@@ -54,16 +53,17 @@ class ArmControlNode(Node):
         self.base_pub = self.create_publisher(Float32, '/base_cmd', 10)
         self.target_pub = self.create_publisher(Point, '/target_pose', 10)
         self.gripper_pub = self.create_publisher(Float32, '/gripper_cmd', 10)
-        self.create_subscription(
-            Float32MultiArray, '/arm_command', self._command_cb, 10)
+        self.estop_pub = self.create_publisher(Bool, ESTOP_TOPIC, ESTOP_QOS)
+        self.estop_active = False
+        self.create_subscription(Bool, ESTOP_TOPIC, self._estop_cb, ESTOP_QOS)
 
-        self.last_command = None
-        self.last_command_time = None
+    def _estop_cb(self, msg: Bool):
+        self.estop_active = bool(msg.data)
 
-    def _command_cb(self, msg: Float32MultiArray):
-        if len(msg.data) >= 5:
-            self.last_command = tuple(msg.data[:5])
-            self.last_command_time = time.monotonic()
+    def send_estop(self, engaged: bool):
+        msg = Bool()
+        msg.data = bool(engaged)
+        self.estop_pub.publish(msg)
 
     def send_base(self, velocity: float):
         msg = Float32()
@@ -94,9 +94,13 @@ class ArmControlWindow(QMainWindow):
         self.setStyleSheet(self._style_sheet())
 
         central = QWidget()
-        root = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        left = QWidget()
+        root = QVBoxLayout(left)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(14)
+        outer.addWidget(left)
         self.setCentralWidget(central)
 
         title = QLabel('Manipulator Control')
@@ -111,15 +115,36 @@ class ArmControlWindow(QMainWindow):
         self.status_label.setObjectName('statusWaiting')
         root.addWidget(self.status_label)
 
-        root.addWidget(self._build_base_group())
-        root.addWidget(self._build_target_group())
-        root.addWidget(self._build_gripper_group())
+        self.estop_button = QPushButton('EMERGENCY STOP')
+        self.estop_button.setMinimumHeight(54)
+        self.estop_button.clicked.connect(self._toggle_estop)
+        self._estop_ui = None
+        root.addWidget(self.estop_button)
+
+        self.limit_label = QLabel('')
+        self.limit_label.setObjectName('eventWarning')
+        self.limit_label.setWordWrap(True)
+        self.limit_label.hide()
+        root.addWidget(self.limit_label)
+
+        self.control_groups = [
+            self._build_base_group(),
+            self._build_target_group(),
+            self._build_gripper_group(),
+        ]
+        for group in self.control_groups:
+            root.addWidget(group)
 
         self.feedback_label = QLabel('No /arm_command received yet.')
         self.feedback_label.setObjectName('feedback')
         self.feedback_label.setWordWrap(True)
         self.feedback_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self.feedback_label)
+
+        self.feedback_pot_label = QLabel('Potentiometer: no /shoulder_feedback yet.')
+        self.feedback_pot_label.setObjectName('feedback')
+        root.addWidget(self.feedback_pot_label)
+        outer.addWidget(self._build_plot_panel(), 1)
 
         self.event_label = QLabel('Ready')
         self.event_label.setObjectName('event')
@@ -128,6 +153,109 @@ class ArmControlWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_status)
         self.status_timer.start(250)
+
+        self.plot_timer = QTimer(self)
+        self.plot_timer.timeout.connect(self._sample_plot)
+        self.plot_timer.start(50)
+
+        self._apply_estop(False)
+        self._set_event('Ready')
+
+    def _build_plot_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 18, 18, 18)
+        heading = QLabel('Joint angles (click legend to toggle)')
+        heading.setObjectName('subtitle')
+        layout.addWidget(heading)
+        self.plot = SignalPlot(unit='deg', window=20.0)
+        for name, color, dashed in (
+                ('Shoulder cmd', '#4cb4ff', True),
+                ('Elbow cmd', '#ff5fa2', True),
+                ('Wrist cmd', '#ffc857', True),
+                ('Shoulder pot', '#2dd4bf', False),
+                ('Shoulder enc', '#1d8fe0', False),
+                ('Elbow enc', '#e0357f', False),
+                ('Wrist enc', '#e0a82e', False)):
+            self.plot.add_series(name, color, dashed)
+        # Joint limits (dotted), tied to the matching command series.
+        for name, lo, hi in (
+                ('Shoulder cmd', ik.SH_MIN, ik.SH_MAX),
+                ('Elbow cmd', ik.EL_MIN, ik.EL_MAX),
+                ('Wrist cmd', ik.WR_MIN, ik.WR_MAX)):
+            self.plot.add_limit(name, degrees(lo))
+            self.plot.add_limit(name, degrees(hi))
+        layout.addWidget(self.plot, 1)
+        panel.setMinimumWidth(480)
+        return panel
+
+    def _sample_plot(self):
+        now = time.monotonic()
+        node = self.node
+
+        if node.is_fresh(node.last_command_time, now):
+            for name, value in zip(
+                    ('Shoulder cmd', 'Elbow cmd', 'Wrist cmd'),
+                    node.last_command[1:4]):
+                self.plot.push(name, now, degrees(value))
+        if node.is_fresh(node.last_feedback_time, now):
+            self.plot.push('Shoulder pot', now, degrees(node.last_feedback))
+        if node.is_fresh(node.last_joints_time, now):
+            for name, value in zip(
+                    ('Shoulder enc', 'Elbow enc', 'Wrist enc'),
+                    node.last_joints):
+                self.plot.push(name, now, degrees(value))
+        self.plot.advance(now)
+
+    LIMIT_WARN_MARGIN = radians(5)
+
+    def _limit_warnings(self):
+        """Joints (measured, else commanded) within the margin of a limit."""
+        node = self.node
+        measured = node.measured_joints()
+        command = (node.last_command[1:4]
+                   if node.is_fresh(node.last_command_time) else (None,) * 3)
+        warnings = []
+        for name, meas, cmd, lo, hi in zip(
+                ('shoulder', 'elbow', 'wrist'), measured, command,
+                (ik.SH_MIN, ik.EL_MIN, ik.WR_MIN),
+                (ik.SH_MAX, ik.EL_MAX, ik.WR_MAX)):
+            value = meas if meas is not None else cmd
+            if value is None:
+                continue
+            if value < lo - ik.LIMIT_EPS or value > hi + ik.LIMIT_EPS:
+                warnings.append(f'{name} {degrees(value):.0f}° OUT of limits')
+            elif value - lo < self.LIMIT_WARN_MARGIN:
+                warnings.append(f'{name} {degrees(value - lo):.0f}° from min')
+            elif hi - value < self.LIMIT_WARN_MARGIN:
+                warnings.append(f'{name} {degrees(hi - value):.0f}° from max')
+        return warnings
+
+    def _toggle_estop(self):
+        engaged = not self.node.estop_active
+        self.node.estop_active = engaged
+        self.node.send_estop(engaged)
+        self._apply_estop(engaged)
+
+    def _apply_estop(self, engaged):
+        self._estop_ui = engaged
+        if engaged:
+            self._base_is_moving = False
+            self.node.send_base(0.0)
+            self.estop_button.setText('STOPPED — click to RELEASE')
+            self.estop_button.setStyleSheet(
+                'background: #f0b429; color: #111; font-size: 16px;'
+                'font-weight: 800; border-radius: 6px;')
+            self._set_event('Emergency stop engaged: base stopped, arm frozen',
+                            warning=True)
+        else:
+            self.estop_button.setText('EMERGENCY STOP')
+            self.estop_button.setStyleSheet(
+                'background: #c62828; color: white; font-size: 18px;'
+                'font-weight: 800; border-radius: 6px;')
+            self._set_event('Emergency stop released')
+        for group in self.control_groups:
+            group.setEnabled(not engaged)
 
     @staticmethod
     def _icon_button(symbol, tooltip, object_name=None):
@@ -406,6 +534,25 @@ class ArmControlWindow(QMainWindow):
             self.status_label.setText('Waiting for /arm_command from arm_commander…')
             self.status_label.setObjectName('statusWaiting')
 
+        fb_age = None
+        if self.node.last_feedback_time is not None:
+            fb_age = time.monotonic() - self.node.last_feedback_time
+        if fb_age is not None and fb_age < 1.0:
+            shoulder_deg = degrees(self.node.last_feedback)
+            self.feedback_pot_label.setText(
+                f'Potentiometer (shoulder): {shoulder_deg:.1f}° live')
+        else:
+            self.feedback_pot_label.setText('Potentiometer: no /shoulder_feedback yet.')
+
+        # Follow /estop (set from another GUI instance, or latched before start).
+        if self.node.estop_active != self._estop_ui:
+            self._apply_estop(self.node.estop_active)
+
+        warnings = self._limit_warnings()
+        self.limit_label.setVisible(bool(warnings))
+        if warnings:
+            self.limit_label.setText('Joint limit: ' + '; '.join(warnings))
+
         # Qt does not automatically re-polish a widget after its object name changes.
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
@@ -514,45 +661,9 @@ class ArmControlWindow(QMainWindow):
 
 
 def main(args=None):
-    # Qt owns the main loop, so handle SIGINT here instead of allowing the
-    # default ROS handler to invalidate the context under an active Qt timer.
-    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
-    node = ArmControlNode()
-    app = QApplication(sys.argv)
-    window = ArmControlWindow(node)
-    window.show()
-    signal.signal(signal.SIGINT, lambda _signum, _frame: app.quit())
-
-    ros_timer = QTimer(window)
-
-    def spin_ros():
-        if not rclpy.ok():
-            app.quit()
-            return
-        try:
-            rclpy.spin_once(node, timeout_sec=0)
-        except KeyboardInterrupt:
-            app.quit()
-        except Exception:
-            # The ROS signal handler can invalidate the context between the
-            # check above and spin_once() during launch shutdown.
-            if rclpy.ok():
-                raise
-            app.quit()
-
-    ros_timer.timeout.connect(spin_ros)
-    ros_timer.start(20)
-
-    try:
-        return app.exec_()
-    finally:
-        ros_timer.stop()
-        if rclpy.ok():
-            node.send_base(0.0)
-            rclpy.spin_once(node, timeout_sec=0)
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    return qt_ros.run(
+        ArmControlNode, ArmControlWindow,
+        on_exit=lambda node: node.send_base(0.0), args=args)
 
 
 if __name__ == '__main__':
