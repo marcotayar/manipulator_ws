@@ -57,7 +57,7 @@ class ShoulderFeedbackBridge(Node):
             'elbow/wrist/gripper from /arm_command -> /joint_states')
 
     def _feedback_cb(self, msg: Float32):
-        self.pot = max(ik.SH_MIN, min(ik.SH_MAX, msg.data))
+        self.pot = msg.data
         self.pot_time = time.monotonic()
 
     def _command_cb(self, msg: Float32MultiArray):

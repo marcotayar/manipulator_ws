@@ -169,6 +169,146 @@ silent for 1 s); elbow, wrist and gripper show the *commanded* values, because
 they have no sensors; the base is not shown (no encoder). The plots only use
 real measurements.
 
+For calibrated shoulder feedback and isolated shoulder PID control, use
+`shoulder_pot_feedback/shoulder_pot_feedback.ino`.
+Copy `shoulder_pot_feedback/wifi_config.example.h` to `wifi_config.h` in that
+directory, then set the Wi-Fi credentials and `AGENT_IP` to the computer's current
+Wi-Fi IPv4 address. `wifi_config.h` is ignored by Git; never commit credentials.
+The address can change after reconnecting to a hotspot. Keep the micro-ROS agent
+running on UDP port 8888. Check `ros2 topic hz /shoulder_feedback`: expect about
+20 Hz. The potentiometer wiper must reach GPIO34 through a suitable voltage
+divider, with a shared ground; never exceed the ESP32 ADC input voltage.
+The installed divider uses the measured descending-sweep calibration below.
+Firmware interpolates between adjacent anchors and clamps feedback to 0–75°.
+
+| Shoulder angle from horizontal | Raw ADC median |
+|---|---|
+| 0° | 2319 |
+| 15° | 2525 |
+| 30° | 2687 |
+| 45° | 2874 |
+| 60° | 3037 |
+| 75° | 3100 |
+
+At 90° the raw median was 3101, indistinguishable from 75° within measured noise.
+Consequently, feedback cannot identify motion above 75°; 75° is a saturation
+value, not proof of the physical angle. Sensitivity is lower near the upper end.
+An ascending 45° check gave ADC 2865 (44.28° with this mapping). This is a held-point
+calibration, not an independently validated full-travel accuracy specification.
+Recalibrate `SHOULDER_CALIBRATION` after changing the divider or wiring, using
+`CALIBRATE_MODE 1` to read raw ADC over USB at 115200 baud.
+Measured shoulder feedback is displayed without the commanded-motion 10° lower
+limit; command limits are unchanged.
+
+#### Shoulder PID position control (TB6612FNG HW166)
+
+The shoulder is a two-wire DC motor driven by channel B, not a PWM-position servo.
+The standalone sketch retains GPIO34 potentiometer feedback.
+
+| Driver terminal | Connection |
+|---|---|
+| PWMB | ESP32 GPIO32 |
+| BIN1 / BIN2 | ESP32 GPIO14 / GPIO13 |
+| STBY | ESP32 GPIO25 |
+| AIN1 / AIN2 | ESP32 GPIO26 / GPIO27 (held low; channel A unused) |
+| BO1 / BO2 | Shoulder motor leads |
+| VCC | ESP32 3V3 (logic supply) |
+| VM | Motor's rated external supply |
+| GND | ESP32 GND and external supply negative |
+
+VCC is separate from VM. At 5 V logic supply, the driver's guaranteed input-high
+threshold exceeds the ESP32's 3.3 V output; use 3.3 V for VCC. Check the motor's
+stall current against the driver/module rating before powering it.
+See the [TB6612FNG datasheet](https://www.pololu.com/file/0J86/TB6612FNG.pdf).
+
+`shoulder_pot_feedback/shoulder_pot_feedback.ino` runs a 20 Hz position PID on
+the ESP32 using the measured potentiometer calibration. Positive duty raises
+the shoulder; negative duty lowers it. Channel B uses 20 kHz PWM.
+The open-loop duty topic is removed: the PC sends a position target, not power.
+
+| Topic | Type | Meaning |
+|---|---|---|
+| `/shoulder_target_deg` | `std_msgs/Float32` | Finite target in degrees from horizontal, 5–70° |
+| `/shoulder_pid_enable` | `std_msgs/Bool` | Explicit enable/disable; disabled at boot |
+| `/shoulder_feedback` | `std_msgs/Float32` | Measured angle in radians, unchanged |
+| `/estop` | `std_msgs/Bool` | Transient-local safety subscription; true disables PID |
+| `/shoulder_pid_gains` | `std_msgs/Float32MultiArray` | Exactly `[Kp, Ki, Kd]`; accepted only disabled and not estopped |
+| `/shoulder_pid_telemetry` | `std_msgs/Float32MultiArray` | Firmware diagnostics at 20 Hz; schema below |
+
+Targets must be refreshed within 1 second. Enabling requires a fresh valid target
+and a valid measurement less than 150 ms old. Invalid targets, out-of-calibration
+ADC readings, measured angles outside 5–70°, stale targets/control updates, and
+initialization errors disable PID and enter standby. E-stop release never
+re-enables it: send a fresh target and explicitly enable again.
+These are software checks, not a hardware safety cutoff; standby coasts and
+does **not** hold the arm against gravity. Keep the arm supported and motor power
+accessible during commissioning. Sensor saturation above 75° is not recoverable.
+
+Initial, **not hardware-tuned**, gains are `PID_KP=0.6`, `PID_KI=0.1`,
+`PID_KD=0.04`, with degrees as the error unit and duty percent as the output unit.
+Output is limited to ±15%. The controller uses measured elapsed time,
+derivative on measurement with a 0.1 s velocity low-pass filter, and conditional
+integration anti-windup. No minimum-duty kick or gravity compensation is assumed.
+It may respond slowly, stall or oscillate until tuned for the actual load.
+
+**Graphical tuning:** launch `manipulator_control hardware.launch.py` and open
+the **Shoulder PID** tab in the Qt panel. It plots target versus measured angle,
+tracking error, and P/I/D contributions plus actual quantized output duty. Gains
+are shown as confirmed only when firmware telemetry acknowledges them; edits
+alone do not change the controller. Apply gains while disabled. Enter a target
+and click **Send target** (or press Enter) to send one setpoint even while PID is
+disabled; the panel confirms its receipt from firmware telemetry. This does not
+enable motor output. A one-shot target is not kept fresh indefinitely.
+Click **Enable PID** separately to start the 10 Hz target heartbeat, acknowledge
+the target, and request control. Start at the measured position. Stop disables
+PID and stops the heartbeat. Stale telemetry cancels the heartbeat and pending
+enable; reconnecting does not automatically restart motion.
+
+Gain ranges are Kp 0–5, Ki 0–2, Kd 0–1 (finite values only). The ±15% output
+limit is not raised by gain changes. Live tuning means monitoring the response
+and adjusting gains between disabled runs, not changing gains during motion.
+
+Telemetry has exactly 14 values:
+`[target_deg, measured_deg, error_deg, P_duty, I_duty, D_duty, output_duty,
+enabled, estop, Kp, Ki, Kd, max_duty, fault_code]`.
+Duty quantities are percentages; enabled/estop are 0 or 1. Fault codes:
+0 none, 1 invalid/stale target, 2 invalid/out-of-safe-range feedback,
+3 control timeout, 4 emergency stop. Disabled output and P/I/D terms are zero.
+
+
+Build only (does not upload or move hardware):
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32 shoulder_pot_feedback
+```
+
+After a separate, supervised upload/commissioning step, start a continuous target
+publisher at the arm's current safe measured angle. Example for an arm at 45°:
+
+```bash
+ros2 topic pub --rate 10 /shoulder_target_deg std_msgs/msg/Float32 "{data: 45.0}"
+```
+
+In another terminal, explicitly enable:
+
+```bash
+ros2 topic pub --once /shoulder_pid_enable std_msgs/msg/Bool "{data: true}"
+```
+
+Disable while continuing to support the arm:
+
+```bash
+ros2 topic pub --once /shoulder_pid_enable std_msgs/msg/Bool "{data: false}"
+```
+
+Stopping the target publisher also disables control after the one-second timeout.
+The panel's existing IK position controls and `/arm_command` do not feed this
+isolated shoulder controller; use its Shoulder PID tab or the direct topics.
+The panel's `/estop` also disables the shoulder PID. The all-servo
+`esp32_microros.ino` is a different hardware configuration and must not be flashed
+on this TB6612 wiring: its output pins conflict with the driver connections.
+
+
 **Emergency stop.** The red button publishes a latched `/estop`
 (`std_msgs/Bool`). While engaged, `arm_commander` and `ik_node` stop the base,
 freeze the arm at its last command and ignore new targets, base and gripper

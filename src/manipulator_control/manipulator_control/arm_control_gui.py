@@ -11,7 +11,7 @@ import time
 from math import cos, degrees, radians, sin
 
 from geometry_msgs.msg import Point
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, Float32MultiArray
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
@@ -22,7 +22,9 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +34,7 @@ from manipulator_control import qt_ros
 from manipulator_control.arm_telemetry import ArmTelemetry
 from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
 from manipulator_control.signal_plot import SignalPlot
+from manipulator_control.shoulder_pid_panel import ShoulderPidPanel, valid_telemetry
 
 
 BASE_SPEED_MIN = 0.1
@@ -56,6 +59,38 @@ class ArmControlNode(ArmTelemetry):
         self.estop_pub = self.create_publisher(Bool, ESTOP_TOPIC, ESTOP_QOS)
         self.estop_active = False
         self.create_subscription(Bool, ESTOP_TOPIC, self._estop_cb, ESTOP_QOS)
+        self.pid_target_pub = self.create_publisher(Float32, '/shoulder_target_deg', 10)
+        self.pid_enable_pub = self.create_publisher(Bool, '/shoulder_pid_enable', 10)
+        self.pid_gains_pub = self.create_publisher(
+            Float32MultiArray, '/shoulder_pid_gains', 10)
+        self.pid_telemetry_callback = None
+        self.create_subscription(
+            Float32MultiArray, '/shoulder_pid_telemetry', self._pid_telemetry_cb, 10)
+
+    def _pid_telemetry_cb(self, msg):
+        values = tuple(msg.data)
+        if self.pid_telemetry_callback is not None:
+            self.pid_telemetry_callback(
+                values if valid_telemetry(values) else None, time.monotonic())
+
+    def send_pid_target(self, target_deg):
+        msg = Float32()
+        msg.data = float(target_deg)
+        self.pid_target_pub.publish(msg)
+
+    def send_pid_enable(self, enabled):
+        msg = Bool()
+        msg.data = bool(enabled)
+        self.pid_enable_pub.publish(msg)
+
+    def send_pid_gains(self, gains):
+        msg = Float32MultiArray()
+        msg.data = list(gains)
+        self.pid_gains_pub.publish(msg)
+
+    def stop_all(self):
+        self.send_pid_enable(False)
+        self.send_base(0.0)
 
     def _estop_cb(self, msg: Bool):
         self.estop_active = bool(msg.data)
@@ -100,7 +135,11 @@ class ArmControlWindow(QMainWindow):
         root = QVBoxLayout(left)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(14)
-        outer.addWidget(left)
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setWidget(left)
+        controls_scroll.setMinimumWidth(400)
+        outer.addWidget(controls_scroll)
         self.setCentralWidget(central)
 
         title = QLabel('Manipulator Control')
@@ -144,7 +183,16 @@ class ArmControlWindow(QMainWindow):
         self.feedback_pot_label = QLabel('Potentiometer: no /shoulder_feedback yet.')
         self.feedback_pot_label.setObjectName('feedback')
         root.addWidget(self.feedback_pot_label)
-        outer.addWidget(self._build_plot_panel(), 1)
+        graph_tabs = QTabWidget()
+        graph_tabs.setMinimumWidth(500)
+        graph_tabs.addTab(self._build_plot_panel(), 'Joint graphs')
+        self.pid_panel = ShoulderPidPanel(node)
+        graph_tabs.addTab(self.pid_panel, 'Shoulder PID tuning')
+        outer.addWidget(graph_tabs, 1)
+        self.resize(1120, 780)
+        # aboutToQuit also covers SIGINT and app.quit(), not only window close.
+        from PyQt5.QtWidgets import QApplication
+        QApplication.instance().aboutToQuit.connect(self.pid_panel.shutdown)
 
         self.event_label = QLabel('Ready')
         self.event_label.setObjectName('event')
@@ -240,6 +288,7 @@ class ArmControlWindow(QMainWindow):
     def _apply_estop(self, engaged):
         self._estop_ui = engaged
         if engaged:
+            self.pid_panel.emergency_stop()
             self._base_is_moving = False
             self.node.send_base(0.0)
             self.estop_button.setText('STOPPED — click to RELEASE')
@@ -558,6 +607,7 @@ class ArmControlWindow(QMainWindow):
         self.status_label.style().polish(self.status_label)
 
     def closeEvent(self, event):
+        self.pid_panel.shutdown()
         self._stop_base()
         event.accept()
 
@@ -663,7 +713,7 @@ class ArmControlWindow(QMainWindow):
 def main(args=None):
     return qt_ros.run(
         ArmControlNode, ArmControlWindow,
-        on_exit=lambda node: node.send_base(0.0), args=args)
+        on_exit=lambda node: node.stop_all(), args=args)
 
 
 if __name__ == '__main__':

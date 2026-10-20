@@ -30,7 +30,12 @@ def run(node_factory, window_factory, on_exit=None, args=None):
             app.quit()
             return
         try:
-            rclpy.spin_once(node, timeout_sec=0)
+            # Feedback, joint states, commands and PID diagnostics can exceed
+            # 50 callbacks/s. Drain a bounded batch without starving Qt events.
+            for _ in range(10):
+                if not rclpy.ok():
+                    break
+                rclpy.spin_once(node, timeout_sec=0)
         except KeyboardInterrupt:
             app.quit()
         except Exception:

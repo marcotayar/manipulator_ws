@@ -4,3 +4,4 @@ log/
 __pycache__/
 *.pyc
 *.pyo
+/shoulder_pot_feedback/wifi_config.h
