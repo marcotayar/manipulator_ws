@@ -96,22 +96,28 @@ struct Joint {
   float stall_ref_deg;    // angle when output reached the duty cap
   unsigned long stall_start_ms;  // 0 = output below the cap
   float gravity_ff;       // feedforward duty holding this joint's distal links
+  bool runaway_pending;  // require two consecutive violating control samples
 };
 
+// Potentiometers run from the ESP32 3V3 pin (USB-powered; the motor-side 5 V
+// sagged ~24% under motor current). Tables are the original 5 V captures mapped
+// by new = a * old + b, fitted at 90 and 180 deg on the 3V3 supply:
+// shoulder a 0.664 b -82 (mean of elbow/wrist; verified 1270 vs 1263 at 90 deg),
+// elbow a 0.659 b -87, wrist a 0.669 b -78.
 // Shoulder: midpoint of ascending/descending passes (shoulder_calibration_table.csv).
 constexpr CalPoint SHOULDER_CAL[] = {
-    {1639, 75.0f}, {2025, 90.0f}, {2406, 105.0f}, {2687, 120.0f},
-    {2947, 135.0f}, {3160, 150.0f}, {3493, 165.0f}, {3892, 180.0f},
+    {1006, 75.0f}, {1263, 90.0f}, {1516, 105.0f}, {1702, 120.0f},
+    {1875, 135.0f}, {2016, 150.0f}, {2237, 165.0f}, {2502, 180.0f},
 };
 // Elbow: standardized ascending pass (elbow_calibration_capture.csv).
 constexpr CalPoint ELBOW_CAL[] = {
-    {272, 75.0f}, {584, 85.0f}, {750, 90.0f}, {1133, 105.0f}, {1462, 120.0f},
-    {1931, 135.0f}, {2395, 150.0f}, {2868, 165.0f}, {3050, 175.0f}, {3277, 180.0f},
+    {92, 75.0f}, {298, 85.0f}, {407, 90.0f}, {659, 105.0f}, {876, 120.0f},
+    {1185, 135.0f}, {1491, 150.0f}, {1803, 165.0f}, {1922, 175.0f}, {2072, 180.0f},
 };
 // Wrist: decreasing raw with angle (wrist_calibration_capture.csv).
 constexpr CalPoint WRIST_CAL[] = {
-    {3469, 75.0f}, {3304, 85.0f}, {3010, 90.0f}, {2500, 105.0f}, {1902, 120.0f},
-    {1656, 135.0f}, {1164, 150.0f}, {801, 165.0f}, {508, 175.0f}, {332, 180.0f},
+    {2243, 75.0f}, {2133, 85.0f}, {1936, 90.0f}, {1595, 105.0f}, {1194, 120.0f},
+    {1030, 135.0f}, {701, 150.0f}, {458, 165.0f}, {262, 175.0f}, {144, 180.0f},
 };
 
 // Piecewise-linear interpolation; works for increasing or decreasing tables.
@@ -267,6 +273,7 @@ void resetPid(Joint &j) {
   j.setpoint_deg = j.measured_deg;
   j.runaway_ref_deg = j.measured_deg;
   j.runaway_sign = 0;
+  j.runaway_pending = false;
   j.stall_start_ms = 0;
 }
 
@@ -489,11 +496,24 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   if (sign != 0 && sign != j.runaway_sign) {
     j.runaway_sign = sign;
     j.runaway_ref_deg = j.measured_deg;
-  } else if (sign != 0 && abs_error > RUNAWAY_DEG &&
+    j.runaway_pending = false;
+  } else if (sign != 0 && fabsf(j.target_deg - j.measured_deg) > RUNAWAY_DEG &&
              (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
-    // A joint within RUNAWAY_DEG of its setpoint is backlash, not runaway.
+    // Judge tracking against the requested target, not the moving ramp setpoint.
+    if (!j.runaway_pending) {
+      j.runaway_pending = true;
+      return;
+    }
+    const float trigger_output = j.output;
+    const float trigger_reference = j.runaway_ref_deg;
+    const float trigger_setpoint = j.setpoint_deg;
     fault(FAULT_RUNAWAY, index + 1);
+    Serial.printf("RUNAWAY joint=%d raw=%d measured=%.3f target=%.3f setpoint=%.3f output=%.3f reference=%.3f\n",
+                  index + 1, j.raw, j.measured_deg, j.target_deg, trigger_setpoint,
+                  trigger_output, trigger_reference);
     return;
+  } else {
+    j.runaway_pending = false;
   }
 
   // Stall: output pinned at the cap without motion overheats the bridge/motor.

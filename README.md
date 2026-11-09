@@ -261,8 +261,12 @@ wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
 elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles are
 −1 outside the calibration table. Fault codes: 0 none, 1 invalid/stale target,
 2 feedback invalid or outside 80–178°, 3 control timeout, 4 e-stop, 5 runaway
-(joint moved 4° opposite to the push being applied: wrong motor direction or the
-load overpowering the motor; overshoot does not trip it), 6 stall (output at
+(joint moved more than 4° opposite to the applied push and is more than 4°
+from its commanded target, confirmed on two consecutive 20 Hz control samples).
+Zero output does not reset the direction reference; a genuine reversal does.
+On a runaway fault, USB serial records the triggering raw ADC, measured angle,
+target, ramp setpoint, output and reference after braking all joints.
+6 stall (output at
 the duty cap for 1 s with under 1° of motion; protects the TB6612). Any fault
 disables every joint. Targets are followed through an internal 8°/s ramp that
 stays within 6° of the measured angle, so large target jumps do not slam the
