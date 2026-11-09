@@ -237,8 +237,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
 ```
 
 Joint angles are **physical** degrees with 90° as the home pose (arm vertical),
-not the `arm_ik_2d.py` frame. Commands are limited to 85° up to a per-joint
-maximum: **shoulder 105°, elbow 100°, wrist 120°**.
+not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 
 > **The arm falls on any fault or disable.** Every fault (stale target,
 > invalid feedback, stall, runaway, e-stop) and every ordinary disable
@@ -250,9 +249,9 @@ maximum: **shoulder 105°, elbow 100°, wrist 120°**.
 
 | Topic | Type | Meaning |
 |---|---|---|
-| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85° to 105/100/120°, refreshed within 1 s |
+| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
-| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 12 values `[Kp,Ki,Kd,G]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–50% duty with the link horizontal, default 0 |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 12 values `[Kp,Ki,Kd,G]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
 | `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 16 values (below) |
@@ -267,7 +266,8 @@ load overpowering the motor; overshoot does not trip it), 6 stall (output at
 the duty cap for 1 s with under 1° of motion; protects the TB6612). Any fault
 disables every joint. Targets are followed through an internal 15°/s ramp that
 stays within 6° of the measured angle, so large target jumps do not slam the
-joint. Output is capped at 50% duty. Inside the 1.5°
+joint. Output is capped at 80% duty; the 1 s stall cutout limits time at the cap.
+Inside the 1.5°
 deadband the controller stops correcting but keeps applying its frozen integral,
 so gravity-loaded joints hold instead of falling. Control runs in a dedicated
 20 Hz FreeRTOS task, independent of Wi-Fi/micro-ROS stalls.

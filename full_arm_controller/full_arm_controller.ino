@@ -20,16 +20,14 @@
 
   ROS interface (micro-ROS over Wi-Fi, see wifi_config.example.h):
     /arm_joint_targets_deg (Float32MultiArray): exactly [shoulder, elbow, wrist],
-        each 85 deg up to the per-joint limit (shoulder 105, elbow 100, wrist
-        120: beyond these, gearbox friction cannot hold the link when a fault
-        disables the motor), refreshed at least every 1 s.
+        each 85..175 deg, refreshed at least every 1 s.
     /arm_pid_enable (Int32): bitmask, bit0 shoulder, bit1 elbow, bit2 wrist.
         0 disables all. Boots disabled. Enabling requires fresh valid targets,
         valid feedback, and no e-stop.
     /arm_pid_gains (Float32MultiArray): exactly 12 values
         [Kp,Ki,Kd,G shoulder, Kp,Ki,Kd,G elbow, Kp,Ki,Kd,G wrist]; accepted only
         while all joints are disabled and e-stop is released. G is the gravity
-        feedforward in percent duty with the link horizontal (0..50, default 0):
+        feedforward in percent duty with the link horizontal (0..80, default 0):
         feedforward = -G * sin(lean), lean = sum of (angle - 90) from the
         shoulder out to that joint. (Separate topic impossible: the prebuilt
         micro-ROS library allows at most 5 subscriptions.)
@@ -134,9 +132,9 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 
 // ── Limits and timing ───────────────────────────────────────────────────────
 constexpr float TARGET_MIN_DEG = 85.0f;
-// Any fault short-brakes every joint (slows, does not stop, a falling link), so
-// targets stay near vertical (shoulder sagged from 110 deg; wrist held at 118 deg).
-constexpr float TARGET_MAX_DEG[3] = {105.0f, 100.0f, 120.0f};
+// Any fault short-brakes every joint: that slows, but does not stop, a falling
+// link, so the arm needs support whenever it is far from vertical.
+constexpr float TARGET_MAX_DEG[3] = {175.0f, 175.0f, 175.0f};
 constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
@@ -145,7 +143,7 @@ constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the 
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
 constexpr float SETPOINT_RATE_DEG_S = 15.0f;  // target jumps become a gentle ramp
 constexpr float SETPOINT_MAX_LAG_DEG = 6.0f;  // ramp waits for a joint held by friction
-constexpr float MAX_DUTY = 50.0f;       // percent; joints need >20% to break stiction
+constexpr float MAX_DUTY = 80.0f;       // percent; stall cutout protects the TB6612
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
 constexpr unsigned long CONTROL_TIMEOUT_MS = 300;  // micro-ROS over Wi-Fi jitters >150 ms
 constexpr unsigned int CONTROL_PERIOD_MS = 50;  // 20 Hz
