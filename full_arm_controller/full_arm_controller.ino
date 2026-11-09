@@ -27,6 +27,10 @@
     /arm_pid_gains (Float32MultiArray): exactly 9 values
         [Kp,Ki,Kd shoulder, Kp,Ki,Kd elbow, Kp,Ki,Kd wrist]; accepted only while
         all joints are disabled and e-stop is released.
+    /arm_gravity_gains (Float32MultiArray): exactly 3 values [G shoulder, G elbow,
+        G wrist], 0..50 percent duty at horizontal; accepted only while all joints
+        are disabled. Feedforward = -G * sin(phi), phi = sum of (angle - 90) from
+        the shoulder out to that joint (link lean from vertical). Defaults 0.
     /estop (Bool, transient-local): true disables all joints.
     /arm_command (Float32MultiArray, existing arm_commander contract): only
         [4] gripper 0 open..1 closed is used.
@@ -91,6 +95,7 @@ struct Joint {
   int runaway_sign;       // +1/-1 push direction, 0 idle
   float stall_ref_deg;    // angle when output reached the duty cap
   unsigned long stall_start_ms;  // 0 = output below the cap
+  float gravity_ff;       // feedforward duty holding this joint's distal links
 };
 
 // Shoulder: midpoint of ascending/descending passes (shoulder_calibration_table.csv).
@@ -199,16 +204,20 @@ float telemetry_snapshot[16];
 
 // ── micro-ROS objects ───────────────────────────────────────────────────────
 rcl_publisher_t pub_telemetry;
-rcl_subscription_t sub_targets, sub_enable, sub_gains, sub_estop, sub_arm_command;
+rcl_subscription_t sub_targets, sub_enable, sub_gains, sub_estop, sub_arm_command,
+    sub_gravity;
 std_msgs__msg__Int32 enable_msg;
 std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
 float targets_storage[3];
 float gains_storage[9];
+float gravity_storage[3];
+float gravity_gain[3] = {0.0f, 0.0f, 0.0f};  // percent duty with the link horizontal
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
 std_msgs__msg__Float32MultiArray gains_msg = {};
+std_msgs__msg__Float32MultiArray gravity_msg = {};
 std_msgs__msg__Float32MultiArray arm_command_msg = {};
 std_msgs__msg__Float32MultiArray telemetry_msg = {};
 rclc_executor_t executor;
@@ -403,6 +412,32 @@ void gainsCallback(const void *msgin) {
   }
 }
 
+void gravityCallback(const void *msgin) {
+  StateLock lock;
+  const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
+  if (enabled_mask != 0 || estop_active || msg->data.size != JOINT_COUNT) return;
+  for (int i = 0; i < JOINT_COUNT; ++i) {
+    const float g = msg->data.data[i];
+    if (!isfinite(g) || g < 0.0f || g > MAX_DUTY) return;  // reject whole message
+  }
+  for (int i = 0; i < JOINT_COUNT; ++i) gravity_gain[i] = msg->data.data[i];
+}
+
+// Gravity pulls each link further from vertical. Positive duty increases the
+// angle, so the hold is -G * sin(lean). Lean accumulates outward from the shoulder
+// (assumes every joint's angle increases in the same rotational sense). A joint
+// whose lean is unknown (invalid proximal reading) gets no feedforward.
+void updateGravityFeedforward() {
+  float lean_deg = 0.0f;
+  bool lean_valid = true;
+  for (int i = 0; i < JOINT_COUNT; ++i) {
+    lean_valid = lean_valid && joints[i].measurement_valid;
+    lean_deg += joints[i].measured_deg - 90.0f;
+    joints[i].gravity_ff =
+        lean_valid ? -gravity_gain[i] * sinf(lean_deg * 0.0174533f) : 0.0f;
+  }
+}
+
 void estopCallback(const void *msgin) {
   StateLock lock;
   estop_active = static_cast<const std_msgs__msg__Bool *>(msgin)->data;
@@ -439,20 +474,20 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
     // the frozen integral so a gravity-loaded joint holds instead of falling.
     j.p_term = 0.0f;
     j.d_term = 0.0f;
-    applyDuty(j, j.integral);
+    applyDuty(j, j.gravity_ff + j.integral);
   } else {
     j.p_term = j.kp * error;
     j.d_term = -j.kd * j.filtered_velocity;
     const float candidate_integral =
         constrain(j.integral + j.ki * error * dt, -MAX_DUTY, MAX_DUTY);
     const float pd = j.p_term + j.d_term;
-    const float candidate_output = pd + candidate_integral;
+    const float candidate_output = j.gravity_ff + pd + candidate_integral;
     // Conditional integration anti-windup.
     if (!((candidate_output > MAX_DUTY && error > 0.0f) ||
           (candidate_output < -MAX_DUTY && error < 0.0f))) {
       j.integral = candidate_integral;
     }
-    applyDuty(j, pd + j.integral);
+    applyDuty(j, j.gravity_ff + pd + j.integral);
   }
 
   // Runaway: the joint moved RUNAWAY_DEG opposite to the push being applied
@@ -503,6 +538,7 @@ void controlStep() {
     } else if (enabled_mask != 0 && elapsed_ms != 0) {
       last_control_ms = now;
       const float dt = elapsed_ms * 0.001f;
+      updateGravityFeedforward();
       for (int i = 0; i < JOINT_COUNT && enabled_mask != 0; ++i) {
         if (enabled_mask & (1u << i)) controlJoint(joints[i], i, dt, now);
       }
@@ -569,6 +605,7 @@ void microrosInit() {
 
   targets_msg.data = {targets_storage, 0, 3};
   gains_msg.data = {gains_storage, 0, 9};
+  gravity_msg.data = {gravity_storage, 0, 3};
   arm_command_msg.data = {arm_command_storage, 0, 8};
   telemetry_msg.data = {telemetry_storage, 16, 16};
 
@@ -585,6 +622,9 @@ void microrosInit() {
   RCCHECK(rclc_subscription_init_default(&sub_gains, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "/arm_pid_gains"));
+  RCCHECK(rclc_subscription_init_default(&sub_gravity, &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+      "/arm_gravity_gains"));
   RCCHECK(rclc_subscription_init_default(&sub_arm_command, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "/arm_command"));
@@ -594,7 +634,7 @@ void microrosInit() {
   RCCHECK(rclc_subscription_init(&sub_estop, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/estop", &estop_qos));
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 6, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
   // Safety state and targets are processed before telemetry publication.
   RCCHECK(rclc_executor_add_subscription(
       &executor, &sub_estop, &estop_msg, estopCallback, ON_NEW_DATA));
@@ -604,6 +644,8 @@ void microrosInit() {
       &executor, &sub_enable, &enable_msg, enableCallback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
       &executor, &sub_gains, &gains_msg, gainsCallback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+      &executor, &sub_gravity, &gravity_msg, gravityCallback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
       &executor, &sub_arm_command, &arm_command_msg, armCommandCallback,
       ON_NEW_DATA));
