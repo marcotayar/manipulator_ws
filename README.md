@@ -264,7 +264,7 @@ elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles a
 (joint moved 4° opposite to the push being applied: wrong motor direction or the
 load overpowering the motor; overshoot does not trip it), 6 stall (output at
 the duty cap for 1 s with under 1° of motion; protects the TB6612). Any fault
-disables every joint. Targets are followed through an internal 15°/s ramp that
+disables every joint. Targets are followed through an internal 8°/s ramp that
 stays within 6° of the measured angle, so large target jumps do not slam the
 joint. Output is capped at 80% duty; the 1 s stall cutout limits time at the cap.
 Inside the 1.5°

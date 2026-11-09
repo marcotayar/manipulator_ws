@@ -141,7 +141,7 @@ constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
 constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
-constexpr float SETPOINT_RATE_DEG_S = 15.0f;  // target jumps become a gentle ramp
+constexpr float SETPOINT_RATE_DEG_S = 8.0f;  // slow enough not to whip the wrist
 constexpr float SETPOINT_MAX_LAG_DEG = 6.0f;  // ramp waits for a joint held by friction
 constexpr float MAX_DUTY = 80.0f;       // percent; stall cutout protects the TB6612
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
@@ -182,7 +182,7 @@ Joint joints[3] = {
     {32, 14, 13, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the elbow
     {23, 22, 21, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
-     +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the wrist
+     +1.0f, 5.0f, 2.0f, 0.04f},  // verified: IN1 HIGH raises the wrist
 };
 constexpr int JOINT_COUNT = 3;
 
