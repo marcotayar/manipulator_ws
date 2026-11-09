@@ -261,8 +261,9 @@ wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
 elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles are
 −1 outside the calibration table. Fault codes: 0 none, 1 invalid/stale target,
 2 feedback invalid or outside 80–178°, 3 control timeout, 4 e-stop, 5 runaway
-(joint moved more than 4° opposite to the applied push and is more than 4°
-from its commanded target, confirmed on two consecutive 20 Hz control samples).
+(joint moved more than 4° opposite to the applied push, away from its commanded
+target, and is more than 4° from it, confirmed on two consecutive 20 Hz control
+samples; a joint carried toward its target while the controller brakes is fine).
 Zero output does not reset the direction reference; a genuine reversal does.
 On a runaway fault, USB serial records the triggering raw ADC, measured angle,
 target, ramp setpoint, output and reference after braking all joints.

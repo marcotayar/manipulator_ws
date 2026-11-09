@@ -498,8 +498,10 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
     j.runaway_ref_deg = j.measured_deg;
     j.runaway_pending = false;
   } else if (sign != 0 && fabsf(j.target_deg - j.measured_deg) > RUNAWAY_DEG &&
-             (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
-    // Judge tracking against the requested target, not the moving ramp setpoint.
+             (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG &&
+             (j.measured_deg - j.runaway_ref_deg) * (j.target_deg - j.measured_deg) < 0.0f) {
+    // Runaway = moved against the push AND away from the target. Gravity carrying
+    // a joint toward its target faster than the ramp (controller braking) is not.
     if (!j.runaway_pending) {
       j.runaway_pending = true;
       return;
