@@ -89,6 +89,7 @@ struct Joint {
   float setpoint_deg;     // ramps toward target_deg at SETPOINT_RATE_DEG_S
   float runaway_ref_deg;  // angle when the current push direction started
   int runaway_sign;       // +1/-1 push direction, 0 idle
+  unsigned long runaway_since_ms;  // when the current push direction started
   float stall_ref_deg;    // angle when output reached the duty cap
   unsigned long stall_start_ms;  // 0 = output below the cap
 };
@@ -132,6 +133,7 @@ constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
+constexpr unsigned long RUNAWAY_GRACE_MS = 300;  // coasting after a reversal is not runaway
 constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
 constexpr float SETPOINT_RATE_DEG_S = 15.0f;  // target jumps become a gentle ramp
@@ -461,6 +463,10 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   const int sign = j.output > 1.0f ? 1 : (j.output < -1.0f ? -1 : 0);
   if (sign != j.runaway_sign) {
     j.runaway_sign = sign;
+    j.runaway_since_ms = now;
+    j.runaway_ref_deg = j.measured_deg;
+  } else if (now - j.runaway_since_ms < RUNAWAY_GRACE_MS) {
+    // Momentum from the previous direction: measure only from where coasting ends.
     j.runaway_ref_deg = j.measured_deg;
   } else if (sign != 0 && (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
     fault(FAULT_RUNAWAY, index + 1);
