@@ -267,9 +267,11 @@ so gravity-loaded joints hold instead of falling. Control runs in a dedicated
 the sum of `(angle − 90°)` from the shoulder out to that joint (how far its
 distal links lean from vertical). This assumes all three joints increase their
 angle in the same rotational sense. A joint gets no feedforward if any reading
-from the shoulder out to it is invalid. Gains are not yet identified on hardware
-and default to 0, so behaviour is unchanged until `G` is set in `/arm_pid_gains`.
-The prebuilt micro-ROS library allows at most 5 subscriptions, so `G` shares the
+from the shoulder out to it is invalid. Friction (about ±12% duty) is larger
+than gravity near vertical, so `G` cannot be fitted precisely; the wrist default
+`G = 25` was chosen and verified on hardware (holds near 118°, returns from 118°
+to 99° and holds). Shoulder and elbow default to 0 (not yet identified). The
+prebuilt micro-ROS library allows at most 5 subscriptions, so `G` shares the
 gains message instead of having its own topic.
 
 **Commissioning results:** all three directions are verified. Shoulder (Kp 2.0,

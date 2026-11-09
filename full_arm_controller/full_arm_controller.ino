@@ -210,7 +210,9 @@ std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
 float targets_storage[3];
 float gains_storage[12];
-float gravity_gain[3] = {0.0f, 0.0f, 0.0f};  // percent duty with the link horizontal
+// Percent duty with the link horizontal. Wrist 25 verified on hardware (holds at
+// 118 deg, returns to 99 deg); shoulder/elbow not yet identified.
+float gravity_gain[3] = {0.0f, 0.0f, 25.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
