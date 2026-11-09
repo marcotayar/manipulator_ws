@@ -489,7 +489,9 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   if (sign != 0 && sign != j.runaway_sign) {
     j.runaway_sign = sign;
     j.runaway_ref_deg = j.measured_deg;
-  } else if (sign != 0 && (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
+  } else if (sign != 0 && abs_error > RUNAWAY_DEG &&
+             (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
+    // A joint within RUNAWAY_DEG of its setpoint is backlash, not runaway.
     fault(FAULT_RUNAWAY, index + 1);
     return;
   }
