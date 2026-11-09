@@ -531,7 +531,17 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
 
 // One 20 Hz control step. Caller holds state_mutex.
 void controlStep() {
+  // Motor PWM switching couples into the high-impedance wiper lines and shifts
+  // readings by several degrees. Hold every PWM low (short brake) while sampling,
+  // then restore the previous duties: ~3 ms of each 50 ms cycle.
+  uint32_t saved_pwm[JOINT_COUNT];
+  for (int i = 0; i < JOINT_COUNT; ++i) {
+    saved_pwm[i] = ledcRead(joints[i].pwm_channel);
+    ledcWrite(joints[i].pwm_channel, 0);
+  }
+  delayMicroseconds(300);
   for (Joint &j : joints) measureJoint(j);
+  for (int i = 0; i < JOINT_COUNT; ++i) ledcWrite(joints[i].pwm_channel, saved_pwm[i]);
   const unsigned long now = millis();
   const unsigned long elapsed_ms = now - last_control_ms;
 
