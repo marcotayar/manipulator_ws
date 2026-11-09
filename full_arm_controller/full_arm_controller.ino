@@ -483,8 +483,10 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   // Runaway: the joint moved RUNAWAY_DEG opposite to the push being applied
   // (reversed motor wiring/direction, or the load overpowering the motor).
   // Overshoot is not runaway: it moves the way the motor was pushing.
+  // Only a genuine reversal (+ to - or - to +) restarts the reference; brief
+  // passes through zero output must not, or a sagging joint never accumulates.
   const int sign = j.output > 1.0f ? 1 : (j.output < -1.0f ? -1 : 0);
-  if (sign != j.runaway_sign) {
+  if (sign != 0 && sign != j.runaway_sign) {
     j.runaway_sign = sign;
     j.runaway_ref_deg = j.measured_deg;
   } else if (sign != 0 && (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
