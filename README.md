@@ -243,8 +243,7 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 |---|---|---|
 | `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
-| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 9 values `[Kp,Ki,Kd]` × shoulder/elbow/wrist; only while all disabled |
-| `/arm_gravity_gains` | `std_msgs/Float32MultiArray` | 3 values `[G shoulder, G elbow, G wrist]`, 0–50% duty with the link horizontal; only while all disabled; default 0 |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 12 values `[Kp,Ki,Kd,G]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–50% duty with the link horizontal, default 0 |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
 | `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 16 values (below) |
@@ -269,7 +268,9 @@ the sum of `(angle − 90°)` from the shoulder out to that joint (how far its
 distal links lean from vertical). This assumes all three joints increase their
 angle in the same rotational sense. A joint gets no feedforward if any reading
 from the shoulder out to it is invalid. Gains are not yet identified on hardware
-and default to 0, so behaviour is unchanged until `/arm_gravity_gains` is set.
+and default to 0, so behaviour is unchanged until `G` is set in `/arm_pid_gains`.
+The prebuilt micro-ROS library allows at most 5 subscriptions, so `G` shares the
+gains message instead of having its own topic.
 
 **Commissioning results:** all three directions are verified. Shoulder (Kp 2.0,
 Ki 0.3) and wrist (Kp 4.0, Ki 1.0) reach a 5° step; both need about 10–22% duty
