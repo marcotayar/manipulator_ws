@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Full Arm Electrical Diagram</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f5f7fa; --card:#fff; --ink:#172033; --muted:#5d687a; --line:#65758b; --signal:#1769aa; --adc:#8e44ad; --power:#c0392b; --ground:#44515f; --safe:#198754; --warn:#b66a00; --border:#cbd3df; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#111722; --card:#1a2230; --ink:#e8edf5; --muted:#aeb8c8; --line:#a4afbe; --signal:#62b5f2; --adc:#d59aef; --power:#ff8578; --ground:#c4ccd7; --safe:#64d69a; --warn:#ffbe58; --border:#435065; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+    main { width:min(1400px,100%); margin:auto; padding:24px; }
+    h1 { margin:0 0 4px; font-size:clamp(24px,4vw,38px); }
+    h2 { margin:28px 0 12px; }
+    p { margin:6px 0; }
+    .subtitle,.note { color:var(--muted); }
+    .warning { border-left:5px solid var(--warn); background:color-mix(in srgb,var(--warn) 10%,var(--card)); padding:12px 14px; margin:16px 0; }
+    .safe { border-left-color:var(--safe); }
+    .diagram { width:100%; height:auto; display:block; background:var(--card); border:1px solid var(--border); border-radius:12px; }
+    .box { fill:var(--card); stroke:var(--border); stroke-width:2; }
+    .esp { fill:color-mix(in srgb,var(--signal) 9%,var(--card)); stroke:var(--signal); }
+    .driver { fill:color-mix(in srgb,var(--safe) 8%,var(--card)); stroke:var(--safe); }
+    .device { fill:color-mix(in srgb,var(--adc) 7%,var(--card)); stroke:var(--adc); }
+    .label { fill:var(--ink); font:600 16px system-ui,sans-serif; }
+    .small { fill:var(--ink); font:13px ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .tiny { fill:var(--muted); font:12px system-ui,sans-serif; }
+    .wire { fill:none; stroke:var(--line); stroke-width:2.2; }
+    .signal { stroke:var(--signal); }
+    .adc { stroke:var(--adc); }
+    .power { stroke:var(--power); }
+    .ground { stroke:var(--ground); }
+    .dash { stroke-dasharray:7 5; }
+    table { width:100%; border-collapse:collapse; background:var(--card); }
+    th,td { border:1px solid var(--border); padding:8px 10px; text-align:left; }
+    th { background:color-mix(in srgb,var(--signal) 8%,var(--card)); }
+    code { background:color-mix(in srgb,var(--ink) 8%,transparent); padding:1px 4px; border-radius:4px; }
+    .legend { display:flex; flex-wrap:wrap; gap:16px; margin:10px 0; color:var(--muted); }
+    .swatch { display:inline-block; width:26px; border-top:3px solid; margin-right:6px; vertical-align:middle; }
+    @media print { main { width:100%; padding:8mm; } .diagram { border:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ESP32 Full Arm Electrical Diagram</h1>
+  <p class="subtitle">Two TB6612FNG drivers, three DC servo motors with potentiometer feedback, base servo, and gripper servo.</p>
+  <div class="warning"><strong>Power off before rewiring.</strong> Motor supply VM does not come from the ESP32. All grounds must be common. No ESP32 input may exceed 3.3 V.</div>
+
+  <div class="legend">
+    <span><i class="swatch" style="border-color:var(--signal)"></i>control signal</span>
+    <span><i class="swatch" style="border-color:var(--adc)"></i>potentiometer feedback</span>
+    <span><i class="swatch" style="border-color:var(--power)"></i>power</span>
+    <span><i class="swatch" style="border-color:var(--ground)"></i>common ground</span>
+  </div>
+
+  <svg class="diagram" viewBox="0 0 1360 900" role="img" aria-labelledby="diag-title diag-desc">
+    <title id="diag-title">Full arm wiring overview</title>
+    <desc id="diag-desc">ESP32 connections to two TB6612 drivers, shoulder, elbow, wrist, base and gripper, including direct potentiometer feedback wiring.</desc>
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--line)"/></marker>
+    </defs>
+
+    <rect class="box esp" x="35" y="55" width="280" height="775" rx="14"/>
+    <text class="label" x="175" y="88" text-anchor="middle">ESP32 DevKit</text>
+    <text class="small" x="55" y="130">GPIO19  shoulder PWM</text>
+    <text class="small" x="55" y="158">GPIO18  shoulder IN1</text>
+    <text class="small" x="55" y="186">GPIO5   shoulder IN2 *</text>
+    <text class="small" x="55" y="225">GPIO17  elbow PWM</text>
+    <text class="small" x="55" y="253">GPIO16  elbow IN1</text>
+    <text class="small" x="55" y="281">GPIO15  elbow IN2 *</text>
+    <text class="small" x="55" y="320">GPIO32  wrist PWM</text>
+    <text class="small" x="55" y="348">GPIO14  wrist IN1</text>
+    <text class="small" x="55" y="376">GPIO13  wrist IN2</text>
+    <text class="small" x="55" y="415">GPIO4   shared STBY</text>
+    <text class="small" x="55" y="465">GPIO34  shoulder ADC</text>
+    <text class="small" x="55" y="493">GPIO39  elbow ADC</text>
+    <text class="small" x="55" y="521">GPIO36  wrist ADC</text>
+    <text class="small" x="55" y="570">GPIO25  base signal</text>
+    <text class="small" x="55" y="598">GPIO26  gripper signal</text>
+    <text class="small" x="55" y="650">3V3     driver logic VCC</text>
+    <text class="small" x="55" y="690">GND     common ground</text>
+    <text class="tiny" x="55" y="780">* GPIO5 and GPIO15 are boot</text>
+    <text class="tiny" x="55" y="799">strapping pins. See warning below.</text>
+
+    <rect class="box driver" x="430" y="55" width="310" height="360" rx="14"/>
+    <text class="label" x="585" y="88" text-anchor="middle">TB6612FNG #1</text>
+    <text class="small" x="450" y="130">Channel A — SHOULDER</text>
+    <text class="small" x="450" y="158">PWMA ← GPIO19</text>
+    <text class="small" x="450" y="186">AIN1 ← GPIO18</text>
+    <text class="small" x="450" y="214">AIN2 ← GPIO5</text>
+    <text class="small" x="450" y="242">AO1/AO2 → shoulder motor</text>
+    <text class="small" x="450" y="285">Channel B — ELBOW</text>
+    <text class="small" x="450" y="313">PWMB ← GPIO17</text>
+    <text class="small" x="450" y="341">BIN1 ← GPIO16</text>
+    <text class="small" x="450" y="369">BIN2 ← GPIO15</text>
+    <text class="small" x="450" y="397">BO1/BO2 → elbow motor</text>
+
+    <rect class="box driver" x="430" y="445" width="310" height="230" rx="14"/>
+    <text class="label" x="585" y="478" text-anchor="middle">TB6612FNG #2</text>
+    <text class="small" x="450" y="520">Channel B — WRIST</text>
+    <text class="small" x="450" y="548">PWMB ← GPIO32</text>
+    <text class="small" x="450" y="576">BIN1 ← GPIO14</text>
+    <text class="small" x="450" y="604">BIN2 ← GPIO13</text>
+    <text class="small" x="450" y="632">BO1/BO2 → wrist motor</text>
+
+    <rect class="box" x="430" y="720" width="310" height="110" rx="14"/>
+    <text class="label" x="585" y="752" text-anchor="middle">Both drivers</text>
+    <text class="small" x="450" y="782">STBY ← GPIO4 (wire together)</text>
+    <text class="small" x="450" y="808">VCC ← ESP32 3V3</text>
+
+    <rect class="box device" x="835" y="45" width="485" height="180" rx="14"/>
+    <text class="label" x="1077" y="77" text-anchor="middle">Shoulder motor + potentiometer</text>
+    <text class="small" x="855" y="110">Motor leads ← TB6612 #1 AO1/AO2</text>
+    <text class="small" x="855" y="140">Wiper → GPIO34 (direct calibrated connection)</text>
+    <text class="tiny" x="855" y="165">Pot ends → regulated +5 V reference and common GND.</text>
+    <text class="tiny" x="855" y="188">Mechanical travel must keep the wiper below 3.3 V.</text>
+
+    <rect class="box device" x="835" y="255" width="485" height="190" rx="14"/>
+    <text class="label" x="1077" y="287" text-anchor="middle">Elbow motor + potentiometer</text>
+    <text class="small" x="855" y="320">Motor leads ← TB6612 #1 BO1/BO2</text>
+    <text class="small" x="855" y="353">Wiper ─────────────→ GPIO39 / VN</text>
+    <text class="small" x="1006" y="379">Direct calibrated connection</text>
+    <text class="tiny" x="855" y="405">Pot ends → regulated +5 V reference and common GND.</text>
+    <text class="tiny" x="855" y="428">Mechanical travel must keep the wiper below 3.3 V.</text>
+
+    <rect class="box device" x="835" y="475" width="485" height="190" rx="14"/>
+    <text class="label" x="1077" y="507" text-anchor="middle">Wrist motor + potentiometer</text>
+    <text class="small" x="855" y="540">Motor leads ← TB6612 #2 BO1/BO2</text>
+    <text class="small" x="855" y="573">Wiper ─────────────→ GPIO36 / VP</text>
+    <text class="small" x="1006" y="599">Direct calibrated connection</text>
+    <text class="tiny" x="855" y="625">Pot ends → regulated +5 V reference and common GND.</text>
+    <text class="tiny" x="855" y="648">Mechanical travel must keep the wiper below 3.3 V.</text>
+
+    <rect class="box device" x="835" y="700" width="225" height="130" rx="14"/>
+    <text class="label" x="947" y="733" text-anchor="middle">Base 360° servo</text>
+    <text class="small" x="855" y="770">Signal ← GPIO25</text>
+    <text class="small" x="855" y="797">Power ← servo supply</text>
+    <text class="small" x="855" y="820">GND ← common GND</text>
+
+    <rect class="box device" x="1090" y="700" width="230" height="130" rx="14"/>
+    <text class="label" x="1205" y="733" text-anchor="middle">Gripper servo</text>
+    <text class="small" x="1110" y="770">Signal ← GPIO26</text>
+    <text class="small" x="1110" y="797">Power ← servo supply</text>
+    <text class="small" x="1110" y="820">GND ← common GND</text>
+
+    <path class="wire signal" d="M315 150H430" marker-end="url(#arrow)"/>
+    <path class="wire signal" d="M315 245H430" marker-end="url(#arrow)"/>
+    <path class="wire signal" d="M315 340H375V555H430" marker-end="url(#arrow)"/>
+    <path class="wire signal dash" d="M315 415H385V775H430" marker-end="url(#arrow)"/>
+    <path class="wire adc" d="M835 140H785V465H315" marker-end="url(#arrow)"/>
+    <path class="wire adc" d="M835 365H790V493H315" marker-end="url(#arrow)"/>
+    <path class="wire adc" d="M835 585H780V521H315" marker-end="url(#arrow)"/>
+    <path class="wire signal" d="M315 570H790V765H835" marker-end="url(#arrow)"/>
+    <path class="wire signal" d="M315 598H770V680H1070V765H1090" marker-end="url(#arrow)"/>
+    <path class="wire" d="M740 210H790V110H835" marker-end="url(#arrow)"/>
+    <path class="wire" d="M740 350H800V320H835" marker-end="url(#arrow)"/>
+    <path class="wire" d="M740 600H835" marker-end="url(#arrow)"/>
+  </svg>
+
+  <h2>Power distribution</h2>
+  <table>
+    <thead><tr><th>Connection</th><th>Connect to</th><th>Important</th></tr></thead>
+    <tbody>
+      <tr><td>TB6612 #1 and #2 VCC</td><td>ESP32 3V3</td><td>Logic power only; do not connect VCC to 5 V.</td></tr>
+      <tr><td>TB6612 #1 and #2 VM</td><td>External motor supply positive</td><td>Use a supply appropriate for the motors and their stall current.</td></tr>
+      <tr><td>Base/gripper servo power</td><td>External regulated servo supply</td><td>Do not power the motors or servos from the ESP32 3V3 pin.</td></tr>
+      <tr><td>Potentiometer reference</td><td>Each pot end terminal to regulated +5 V and common GND</td><td>Wipers connect directly to their calibrated ADC pins; mechanical travel must keep every wiper below 3.3 V.</td></tr>
+      <tr><td>All GND connections</td><td>ESP32 GND + both TB6612 GND + external supply negative + servo grounds + potentiometer grounds</td><td>A common reference is mandatory.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Potentiometer feedback</h2>
+  <p>Each potentiometer uses all three terminals: one end to a regulated +5 V reference, the other end to common GND, and the center wiper directly to the assigned calibrated ADC input.</p>
+  <table>
+    <thead><tr><th>Joint</th><th>ADC input</th><th>Connection</th><th>Calibration</th></tr></thead>
+    <tbody>
+      <tr><td>Shoulder</td><td>GPIO34</td><td>Center wiper directly to GPIO34</td><td>Use only the captured GPIO34 table for the current wiring.</td></tr>
+      <tr><td>Elbow</td><td>GPIO39 / VN</td><td>Center wiper directly to GPIO39</td><td>Use only the captured GPIO39 table for the current wiring.</td></tr>
+      <tr><td>Wrist</td><td>GPIO36 / VP</td><td>Center wiper directly to GPIO36</td><td>Use only the captured GPIO36 table for the current wiring.</td></tr>
+    </tbody>
+  </table>
+  <p class="note">There is no resistor divider in the current build. The potentiometers use 5 V references, and the mechanical joint limits keep the calibrated wiper range below 3.3 V. This provides no electrical overvoltage protection if a mechanical stop, ground, or wiper connection fails. Never apply 5 V directly to an ESP32 ADC pin.</p>
+
+  <div class="warning safe"><strong>Commissioning order:</strong> keep motor power disconnected, verify common ground, measure each ADC node with a multimeter through the full mechanical range, confirm it never exceeds 3.3 V, then run the calibration firmware. Support the arm mechanically throughout calibration.</div>
+  <div class="warning"><strong>Boot warning:</strong> GPIO5 and GPIO15 are ESP32 strapping pins. If the board fails to boot with the drivers attached, disconnect those inputs during reset or revise the wiring and firmware together.</div>
+</main>
+</body>
+</html>

@@ -216,7 +216,9 @@ two-TB6612 wiring. The document labels map to robot joints as follows:
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
 3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
 GPIO34, GPIO36, and GPIO39 are ADC1 input-only pins and remain usable while
-Wi-Fi is active. Potentiometer dividers must never drive them above 3.3 V.
+Wi-Fi is active. In the current build each 5 V-referenced potentiometer wiper
+connects directly to its ADC pin; calibrated mechanical travel must keep it below
+3.3 V. There is no hardware overvoltage protection if a stop or connection fails.
 GPIO5 and GPIO15 are ESP32 strapping pins; if the ESP32 does not boot reliably,
 disconnect those driver inputs before power-up and move them in both the wiring
 and firmware before deployment.
@@ -236,9 +238,9 @@ arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
 ```
 
 Record known-angle points across the elbow and wrist travel before closed-loop
-control is enabled. The existing shoulder table is valid only for the calibrated
-shoulder potentiometer and divider on GPIO34. It must not be copied to the elbow
-on GPIO39 or wrist on GPIO36.
+control is enabled. Each captured calibration table belongs only to its current
+potentiometer, ADC pin, mechanical mounting, and direct-wiper wiring. Never copy
+one joint's table to another or reuse it after rewiring.
 
 #### Shoulder PID position control (TB6612FNG HW166)
 > **Legacy shoulder-only wiring:** this section documents the previously tested

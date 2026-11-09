@@ -1,0 +1,5 @@
+angle_deg,direction,adc_pin,raw_nominal,raw_min,raw_max,accepted_samples
+120,ascending,36,1812,1807,1818,20
+120,descending,36,1989,1983,1994,20
+120,ascending_repeat,36,1902,1895,1911,20
+90,descending_home,36,3018,3012,3024,20

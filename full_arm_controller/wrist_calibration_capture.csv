@@ -1,0 +1,11 @@
+angle_deg,adc_pin,raw_nominal,raw_min,raw_max,accepted_samples,role
+75,36,3469,3466,3474,20,guard_only
+85,36,3304,3298,3308,20,operational
+90,36,3010,3003,3014,20,operational
+105,36,2500,2493,2505,20,operational
+120,36,1902,1895,1911,20,operational
+135,36,1656,1650,1662,20,operational
+150,36,1164,1162,1171,20,operational
+165,36,801,795,806,20,operational
+175,36,508,503,513,20,operational
+180,36,332,327,335,20,guard_only

@@ -1,0 +1,10 @@
+angle_deg,direction,adc_pin,raw_median,raw_min,raw_max,accepted_samples
+120,ascending,39,1427,1424,1435,20
+120,descending,39,1423,1419,1431,20
+105,ascending,39,899,893,905,20
+105,descending,39,1104,1095,1114,20
+90,ascending,39,684,678,689,20
+90,descending,39,771,768,777,20
+85,ascending,39,573,569,580,20
+85,descending,39,705,701,711,20
+105,ascending_repeat,39,1174,1168,1185,20
