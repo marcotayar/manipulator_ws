@@ -241,8 +241,9 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85° up to a per-joint
 maximum: **shoulder 105°, elbow 100°, wrist 120°**.
 
 > **The arm falls on any fault or disable.** Every fault (stale target,
-> invalid feedback, stall, runaway, e-stop) and every ordinary disable coasts
-> all motors. Beyond the limits above, gearbox friction cannot hold the links:
+> invalid feedback, stall, runaway, e-stop) and every ordinary disable
+> short-brakes all motors (TB6612 IN1 = IN2 = HIGH). Braking slows a falling
+> link but the motors cannot hold position unpowered:
 > the shoulder sagged from 110° and then fell past its 180° stop, saturating
 > GPIO34 (above 3.3 V). Keep the arm mechanically supported whenever it is away
 > from vertical, and bring joints back near 90° before disabling.

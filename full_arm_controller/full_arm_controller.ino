@@ -134,8 +134,8 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 
 // ── Limits and timing ───────────────────────────────────────────────────────
 constexpr float TARGET_MIN_DEG = 85.0f;
-// Any fault coasts every joint, so targets stay where friction holds the link
-// passively (shoulder sagged from 110 deg; wrist held at 118 deg).
+// Any fault short-brakes every joint (slows, does not stop, a falling link), so
+// targets stay near vertical (shoulder sagged from 110 deg; wrist held at 118 deg).
 constexpr float TARGET_MAX_DEG[3] = {105.0f, 100.0f, 120.0f};
 constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
@@ -251,10 +251,12 @@ bool jointInSafeRange(const Joint &j) {
 }
 
 // ── Motor output ────────────────────────────────────────────────────────────
-void coastJoint(Joint &j) {
+// TB6612 short brake (IN1 = IN2 = HIGH, STBY HIGH): the motor's back-EMF resists
+// motion, so an unpowered joint creeps instead of falling freely.
+void brakeJoint(Joint &j) {
   ledcWrite(j.pwm_channel, 0);
-  digitalWrite(j.in1_pin, LOW);
-  digitalWrite(j.in2_pin, LOW);
+  digitalWrite(j.in1_pin, HIGH);
+  digitalWrite(j.in2_pin, HIGH);
   j.output = 0.0f;
 }
 
@@ -270,15 +272,11 @@ void resetPid(Joint &j) {
   j.stall_start_ms = 0;
 }
 
-void updateStandby() {
-  digitalWrite(MOTOR_STBY_PIN, enabled_mask != 0 ? HIGH : LOW);
-}
-
 void disableAll() {
   enabled_mask = 0;
-  digitalWrite(MOTOR_STBY_PIN, LOW);
+  digitalWrite(MOTOR_STBY_PIN, HIGH);  // STBY HIGH is required for short brake
   for (Joint &j : joints) {
-    coastJoint(j);
+    brakeJoint(j);
     resetPid(j);
   }
 }
@@ -293,7 +291,7 @@ void applyDuty(Joint &j, float duty) {
   duty = constrain(duty, -MAX_DUTY, MAX_DUTY);
   const unsigned int pwm = (unsigned int)(fabsf(duty) * 2.55f + 0.5f);
   if (pwm == 0) {
-    coastJoint(j);
+    brakeJoint(j);
     return;
   }
   const bool forward = duty * j.direction > 0.0f;
@@ -384,7 +382,7 @@ void enableCallback(const void *msgin) {
     if (mask & bit) {
       if (!(enabled_mask & bit)) resetPid(joints[i]);
     } else {
-      coastJoint(joints[i]);
+      brakeJoint(joints[i]);
       resetPid(joints[i]);
     }
   }
@@ -392,7 +390,6 @@ void enableCallback(const void *msgin) {
   enabled_mask = mask;
   fault_code = FAULT_NONE;
   fault_joint = 0;
-  updateStandby();
 }
 
 void gainsCallback(const void *msgin) {
@@ -684,6 +681,7 @@ void setup() {
     j.target_deg = 90.0f;  // home pose; never used until targets arrive
     resetPid(j);
   }
+  disableAll();  // brake every joint from boot
   state_mutex = xSemaphoreCreateMutex();
 
   ledcSetup(GRIPPER_SERVO_CHANNEL, SERVO_HZ, SERVO_BITS);
