@@ -38,8 +38,9 @@
          enabled_mask, fault_code, fault_joint, estop]
         Angles are -1 when the reading is outside the calibrated table.
         Fault codes: 0 none, 1 invalid/stale target, 2 feedback invalid or
-        outside 80..178 deg, 3 control timeout, 4 e-stop, 5 runaway (error grew
-        4 deg beyond its minimum: wrong motor direction, stall, or sag).
+        outside 80..178 deg, 3 control timeout, 4 e-stop, 5 runaway (joint
+        moved 4 deg opposite to the applied push: wrong direction or sag),
+        6 stall (output at the duty cap for 1 s with under 1 deg of motion).
         fault_joint: 0 none/all, 1 shoulder, 2 elbow, 3 wrist.
 
   Set CALIBRATE_MODE 1 to print raw ADC CSV over USB with every actuator
@@ -85,8 +86,11 @@ struct Joint {
   float target_deg;
   float integral, previous_deg, filtered_velocity;
   float p_term, d_term, output;
-  float min_abs_error;
-  float previous_error;  // sign change = crossed the target (overshoot, not runaway)
+  float setpoint_deg;     // ramps toward target_deg at SETPOINT_RATE_DEG_S
+  float runaway_ref_deg;  // angle when the current push direction started
+  int runaway_sign;       // +1/-1 push direction, 0 idle
+  float stall_ref_deg;    // angle when output reached the duty cap
+  unsigned long stall_start_ms;  // 0 = output below the cap
 };
 
 // Shoulder: midpoint of ascending/descending passes (shoulder_calibration_table.csv).
@@ -128,6 +132,10 @@ constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
+constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
+constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
+constexpr float SETPOINT_RATE_DEG_S = 15.0f;  // target jumps become a gentle ramp
+constexpr float SETPOINT_MAX_LAG_DEG = 6.0f;  // ramp waits for a joint held by friction
 constexpr float MAX_DUTY = 50.0f;       // percent; joints need >20% to break stiction
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
 constexpr unsigned long CONTROL_TIMEOUT_MS = 300;  // micro-ROS over Wi-Fi jitters >150 ms
@@ -157,6 +165,7 @@ enum Fault : unsigned int {
   FAULT_CONTROL_TIMEOUT = 3,
   FAULT_ESTOP = 4,
   FAULT_RUNAWAY = 5,
+  FAULT_STALL = 6,
 };
 
 
@@ -243,8 +252,10 @@ void resetPid(Joint &j) {
   j.p_term = 0.0f;
   j.d_term = 0.0f;
   j.previous_deg = j.measured_deg;
-  j.min_abs_error = fabsf(j.target_deg - j.measured_deg);
-  j.previous_error = j.target_deg - j.measured_deg;
+  j.setpoint_deg = j.measured_deg;
+  j.runaway_ref_deg = j.measured_deg;
+  j.runaway_sign = 0;
+  j.stall_start_ms = 0;
 }
 
 void updateStandby() {
@@ -318,11 +329,6 @@ void targetsCallback(const void *msgin) {
   for (int i = 0; i < JOINT_COUNT; ++i) {
     Joint &j = joints[i];
     const float value = msg->data.data[i];
-    if (fabsf(value - j.target_deg) > 0.5f) {
-      // A new setpoint legitimately increases the error; restart runaway tracking.
-      j.min_abs_error = fabsf(value - j.measured_deg);
-      j.previous_error = value - j.measured_deg;
-    }
     j.target_deg = value;
   }
   last_target_ms = millis();
@@ -417,44 +423,61 @@ void armCommandCallback(const void *msgin) {
 
 // ── 20 Hz control ───────────────────────────────────────────────────────────
 void controlJoint(Joint &j, int index, float dt, unsigned long now) {
-  (void)now;
   const float velocity = (j.measured_deg - j.previous_deg) / dt;
   j.previous_deg = j.measured_deg;
   j.filtered_velocity += dt / (0.1f + dt) * (velocity - j.filtered_velocity);
-  const float error = j.target_deg - j.measured_deg;
+  // Ramp the internal setpoint so a large target jump never becomes a large error.
+  const float max_step = SETPOINT_RATE_DEG_S * dt;
+  j.setpoint_deg += constrain(j.target_deg - j.setpoint_deg, -max_step, max_step);
+  j.setpoint_deg = constrain(j.setpoint_deg, j.measured_deg - SETPOINT_MAX_LAG_DEG,
+                             j.measured_deg + SETPOINT_MAX_LAG_DEG);
+  const float error = j.setpoint_deg - j.measured_deg;
   const float abs_error = fabsf(error);
 
-  // Crossing the target restarts tracking from the overshoot side; a motor driving
-  // the wrong way never crosses, so it still trips.
-  if (error * j.previous_error < 0.0f) j.min_abs_error = abs_error;
-  j.previous_error = error;
-  if (abs_error < j.min_abs_error) j.min_abs_error = abs_error;
-  if (abs_error > j.min_abs_error + RUNAWAY_DEG) {
-    fault(FAULT_RUNAWAY, index + 1);
-    return;
-  }
-
-  if (abs_error <= DEADBAND_DEG) {
+  if (abs_error <= DEADBAND_DEG && fabsf(j.target_deg - j.setpoint_deg) < 0.01f) {
     // Inside calibration/backlash uncertainty: stop correcting, but keep applying
     // the frozen integral so a gravity-loaded joint holds instead of falling.
     j.p_term = 0.0f;
     j.d_term = 0.0f;
     applyDuty(j, j.integral);
+  } else {
+    j.p_term = j.kp * error;
+    j.d_term = -j.kd * j.filtered_velocity;
+    const float candidate_integral =
+        constrain(j.integral + j.ki * error * dt, -MAX_DUTY, MAX_DUTY);
+    const float pd = j.p_term + j.d_term;
+    const float candidate_output = pd + candidate_integral;
+    // Conditional integration anti-windup.
+    if (!((candidate_output > MAX_DUTY && error > 0.0f) ||
+          (candidate_output < -MAX_DUTY && error < 0.0f))) {
+      j.integral = candidate_integral;
+    }
+    applyDuty(j, pd + j.integral);
+  }
+
+  // Runaway: the joint moved RUNAWAY_DEG opposite to the push being applied
+  // (reversed motor wiring/direction, or the load overpowering the motor).
+  // Overshoot is not runaway: it moves the way the motor was pushing.
+  const int sign = j.output > 1.0f ? 1 : (j.output < -1.0f ? -1 : 0);
+  if (sign != j.runaway_sign) {
+    j.runaway_sign = sign;
+    j.runaway_ref_deg = j.measured_deg;
+  } else if (sign != 0 && (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG) {
+    fault(FAULT_RUNAWAY, index + 1);
     return;
   }
 
-  j.p_term = j.kp * error;
-  j.d_term = -j.kd * j.filtered_velocity;
-  const float candidate_integral =
-      constrain(j.integral + j.ki * error * dt, -MAX_DUTY, MAX_DUTY);
-  const float pd = j.p_term + j.d_term;
-  const float candidate_output = pd + candidate_integral;
-  // Conditional integration anti-windup.
-  if (!((candidate_output > MAX_DUTY && error > 0.0f) ||
-        (candidate_output < -MAX_DUTY && error < 0.0f))) {
-    j.integral = candidate_integral;
+  // Stall: output pinned at the cap without motion overheats the bridge/motor.
+  if (fabsf(j.output) >= 0.95f * MAX_DUTY) {
+    if (j.stall_start_ms == 0 || fabsf(j.measured_deg - j.stall_ref_deg) >= STALL_MOVE_DEG) {
+      j.stall_start_ms = now;
+      j.stall_ref_deg = j.measured_deg;
+    } else if (now - j.stall_start_ms >= STALL_TIME_MS) {
+      fault(FAULT_STALL, index + 1);
+    }
+  } else {
+    j.stall_start_ms = 0;
   }
-  applyDuty(j, pd + j.integral);
 }
 
 // One 20 Hz control step. Caller holds state_mutex.

@@ -253,8 +253,12 @@ wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
 elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles are
 −1 outside the calibration table. Fault codes: 0 none, 1 invalid/stale target,
 2 feedback invalid or outside 80–178°, 3 control timeout, 4 e-stop, 5 runaway
-(error grew 4° beyond its minimum: wrong motor direction, stall, or sag). Any
-fault disables every joint. Output is capped at 50% duty. Inside the 1.5°
+(joint moved 4° opposite to the push being applied: wrong motor direction or the
+load overpowering the motor; overshoot does not trip it), 6 stall (output at
+the duty cap for 1 s with under 1° of motion; protects the TB6612). Any fault
+disables every joint. Targets are followed through an internal 15°/s ramp that
+stays within 6° of the measured angle, so large target jumps do not slam the
+joint. Output is capped at 50% duty. Inside the 1.5°
 deadband the controller stops correcting but keeps applying its frozen integral,
 so gravity-loaded joints hold instead of falling. Control runs in a dedicated
 20 Hz FreeRTOS task, independent of Wi-Fi/micro-ROS stalls.
@@ -262,7 +266,7 @@ so gravity-loaded joints hold instead of falling. Control runs in a dedicated
 **Commissioning results:** all three directions are verified. Shoulder (Kp 2.0,
 Ki 0.3) and wrist (Kp 4.0, Ki 1.0) reach a 5° step; both need about 10–22% duty
 to break static friction and stick about 2° past the target. The elbow (Kp 4.0,
-Ki 1.0) cannot lift the forearm at 47% duty. Do not raise its cap: MG996R stall
+Ki 1.0) did not move at all at the 50% cap (stall). Do not raise its cap: MG996R stall
 current exceeds the TB6612's 1.2 A continuous rating. Check VM under load and
 the elbow's mechanical load first. Enable one joint at a time.
 
