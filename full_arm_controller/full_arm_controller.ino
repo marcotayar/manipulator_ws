@@ -86,6 +86,7 @@ struct Joint {
   float integral, previous_deg, filtered_velocity;
   float p_term, d_term, output;
   float min_abs_error;
+  float previous_error;  // sign change = crossed the target (overshoot, not runaway)
 };
 
 // Shoulder: midpoint of ascending/descending passes (shoulder_calibration_table.csv).
@@ -243,6 +244,7 @@ void resetPid(Joint &j) {
   j.d_term = 0.0f;
   j.previous_deg = j.measured_deg;
   j.min_abs_error = fabsf(j.target_deg - j.measured_deg);
+  j.previous_error = j.target_deg - j.measured_deg;
 }
 
 void updateStandby() {
@@ -319,6 +321,7 @@ void targetsCallback(const void *msgin) {
     if (fabsf(value - j.target_deg) > 0.5f) {
       // A new setpoint legitimately increases the error; restart runaway tracking.
       j.min_abs_error = fabsf(value - j.measured_deg);
+      j.previous_error = value - j.measured_deg;
     }
     j.target_deg = value;
   }
@@ -421,6 +424,10 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   const float error = j.target_deg - j.measured_deg;
   const float abs_error = fabsf(error);
 
+  // Crossing the target restarts tracking from the overshoot side; a motor driving
+  // the wrong way never crosses, so it still trips.
+  if (error * j.previous_error < 0.0f) j.min_abs_error = abs_error;
+  j.previous_error = error;
   if (abs_error < j.min_abs_error) j.min_abs_error = abs_error;
   if (abs_error > j.min_abs_error + RUNAWAY_DEG) {
     fault(FAULT_RUNAWAY, index + 1);
