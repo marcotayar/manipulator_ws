@@ -4,10 +4,10 @@
 
   Hardware map (docs/ligacao_pontes_h_esp32.pdf, docs/full_arm_wiring.html):
     Shoulder: TB6612 #1 A, PWM=19, IN1=18, IN2=5,  pot wiper -> GPIO34
-    Elbow:    TB6612 #1 B, PWM=17, IN1=16, IN2=15, pot wiper -> GPIO39 (VN)
-    Wrist:    TB6612 #2 B, PWM=32, IN1=14, IN2=13, pot wiper -> GPIO36 (VP)
+    Base:     TB6612 #1 B, PWM=17, IN1=16, IN2=15  (held LOW: base not controlled yet)
+    Elbow:    TB6612 #2 B, PWM=32, IN1=14, IN2=13, pot wiper -> GPIO39 (VN)
+    Wrist:    TB6612 #2 A, PWM=23, IN1=22, IN2=21, pot wiper -> GPIO36 (VP)
     Both TB6612 STBY pins: GPIO4
-    Base 360-degree servo signal: GPIO25
     Gripper positional servo signal: GPIO26
 
   Potentiometers are 5 V referenced and wired directly to the ADC pins. Only the
@@ -27,10 +27,9 @@
     /arm_pid_gains (Float32MultiArray): exactly 9 values
         [Kp,Ki,Kd shoulder, Kp,Ki,Kd elbow, Kp,Ki,Kd wrist]; accepted only while
         all joints are disabled and e-stop is released.
-    /estop (Bool, transient-local): true disables all joints and stops the base.
+    /estop (Bool, transient-local): true disables all joints.
     /arm_command (Float32MultiArray, existing arm_commander contract): only
-        [0] base velocity -1..1 and [4] gripper 0 open..1 closed are used.
-        The base stops if /arm_command is silent for 1 s.
+        [4] gripper 0 open..1 closed is used.
     /arm_joint_telemetry (Float32MultiArray, 20 Hz): 16 values
         [shoulder_deg, elbow_deg, wrist_deg,
          shoulder_raw, elbow_raw, wrist_raw,
@@ -128,25 +127,25 @@ constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
-constexpr float MAX_DUTY = 25.0f;       // percent; not hardware-tuned
+constexpr float MAX_DUTY = 50.0f;       // percent; joints need >20% to break stiction
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
 constexpr unsigned long CONTROL_TIMEOUT_MS = 300;  // micro-ROS over Wi-Fi jitters >150 ms
-constexpr unsigned long ARM_COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned int CONTROL_PERIOD_MS = 50;  // 20 Hz
 
 constexpr int MOTOR_STBY_PIN = 4;
 constexpr unsigned int MOTOR_PWM_HZ = 20000;
 constexpr unsigned int MOTOR_PWM_BITS = 8;
 
-// Servos share LEDC timer 2 (channels 4/5) at 50 Hz; motors use timers 0/1.
-constexpr int BASE_SERVO_PIN = 25;
+// Base DC motor channel: held LOW (coast) until base control is implemented.
+constexpr int BASE_PWM_PIN = 17;
+constexpr int BASE_IN1_PIN = 16;
+constexpr int BASE_IN2_PIN = 15;
+
+// Gripper servo on LEDC timer 2 (channel 4) at 50 Hz; motors use timers 0/1.
 constexpr int GRIPPER_SERVO_PIN = 26;
-constexpr int BASE_SERVO_CHANNEL = 4;
-constexpr int GRIPPER_SERVO_CHANNEL = 5;
+constexpr int GRIPPER_SERVO_CHANNEL = 4;
 constexpr unsigned int SERVO_HZ = 50;
 constexpr unsigned int SERVO_BITS = 16;
-constexpr int BASE_STOP_US = 1500;
-constexpr int BASE_SPEED_RANGE_US = 200;
 constexpr float GRIP_OPEN_DEG = 80.0f;
 constexpr float GRIP_CLOSED_DEG = 140.0f;
 
@@ -163,10 +162,10 @@ enum Fault : unsigned int {
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
      -1.0f, 2.0f, 0.3f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
-    {17, 16, 15, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
-     +1.0f, 0.6f, 0.1f, 0.04f},
-    {32, 14, 13, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
-     +1.0f, 0.6f, 0.1f, 0.04f},
+    {32, 14, 13, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
+     +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the elbow
+    {23, 22, 21, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
+     +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the wrist
 };
 constexpr int JOINT_COUNT = 3;
 
@@ -177,9 +176,16 @@ bool estop_active = false;
 bool targets_valid = false;
 unsigned long last_target_ms = 0;
 unsigned long last_control_ms = 0;
-unsigned long last_arm_command_ms = 0;
-float base_velocity = 0.0f;
 float gripper_closure = 0.0f;
+
+// Control runs in its own FreeRTOS task so Wi-Fi/micro-ROS stalls never stall
+// the motor loop. The mutex guards all control state shared with callbacks.
+SemaphoreHandle_t state_mutex = nullptr;
+struct StateLock {
+  StateLock() { xSemaphoreTake(state_mutex, portMAX_DELAY); }
+  ~StateLock() { xSemaphoreGive(state_mutex); }
+};
+float telemetry_snapshot[16];
 
 // ── micro-ROS objects ───────────────────────────────────────────────────────
 rcl_publisher_t pub_telemetry;
@@ -279,12 +285,6 @@ void writeServoMicroseconds(int channel, int microseconds) {
   ledcWrite(channel, duty);
 }
 
-void writeBase(float velocity) {
-  velocity = constrain(velocity, -1.0f, 1.0f);
-  writeServoMicroseconds(BASE_SERVO_CHANNEL,
-                         BASE_STOP_US + (int)(velocity * BASE_SPEED_RANGE_US));
-}
-
 void writeGripper(float closure) {
   closure = constrain(closure, 0.0f, 1.0f);
   const float deg = GRIP_OPEN_DEG + closure * (GRIP_CLOSED_DEG - GRIP_OPEN_DEG);
@@ -293,6 +293,7 @@ void writeGripper(float closure) {
 
 // ── Callbacks ───────────────────────────────────────────────────────────────
 void targetsCallback(const void *msgin) {
+  StateLock lock;
   const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
   if (estop_active) {
     targets_valid = false;
@@ -330,6 +331,7 @@ void targetsCallback(const void *msgin) {
 }
 
 void enableCallback(const void *msgin) {
+  StateLock lock;
   const int32_t requested = static_cast<const std_msgs__msg__Int32 *>(msgin)->data;
   const unsigned long now = millis();
   if (requested <= 0) {
@@ -373,6 +375,7 @@ void enableCallback(const void *msgin) {
 }
 
 void gainsCallback(const void *msgin) {
+  StateLock lock;
   const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
   if (enabled_mask != 0 || estop_active || msg->data.size != 9) return;
   for (int i = 0; i < JOINT_COUNT; ++i) {
@@ -392,11 +395,10 @@ void gainsCallback(const void *msgin) {
 }
 
 void estopCallback(const void *msgin) {
+  StateLock lock;
   estop_active = static_cast<const std_msgs__msg__Bool *>(msgin)->data;
   if (estop_active) {
     targets_valid = false;
-    base_velocity = 0.0f;
-    writeBase(0.0f);
     fault(FAULT_ESTOP, 0);
   }
 }
@@ -404,17 +406,9 @@ void estopCallback(const void *msgin) {
 void armCommandCallback(const void *msgin) {
   const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
   if (msg->data.size < 5) return;
-  const float base = msg->data.data[0];
   const float grip = msg->data.data[4];
-  if (!isfinite(base) || !isfinite(grip)) return;
-  last_arm_command_ms = millis();
-  if (estop_active) {
-    base_velocity = 0.0f;
-  } else {
-    base_velocity = base;
-    gripper_closure = grip;
-  }
-  writeBase(base_velocity);
+  if (!isfinite(grip) || estop_active) return;
+  gripper_closure = grip;
   writeGripper(gripper_closure);
 }
 
@@ -434,10 +428,11 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   }
 
   if (abs_error <= DEADBAND_DEG) {
-    // Inside calibration/backlash uncertainty: hold still, keep the integral.
+    // Inside calibration/backlash uncertainty: stop correcting, but keep applying
+    // the frozen integral so a gravity-loaded joint holds instead of falling.
     j.p_term = 0.0f;
     j.d_term = 0.0f;
-    coastJoint(j);
+    applyDuty(j, j.integral);
     return;
   }
 
@@ -455,9 +450,8 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   applyDuty(j, pd + j.integral);
 }
 
-void timerCallback(rcl_timer_t *t, int64_t last_call_time) {
-  (void)last_call_time;
-  if (t == NULL) return;
+// One 20 Hz control step. Caller holds state_mutex.
+void controlStep() {
   for (Joint &j : joints) measureJoint(j);
   const unsigned long now = millis();
   const unsigned long elapsed_ms = now - last_control_ms;
@@ -487,22 +481,42 @@ void timerCallback(rcl_timer_t *t, int64_t last_call_time) {
 
   for (int i = 0; i < JOINT_COUNT; ++i) {
     const Joint &j = joints[i];
-    telemetry_storage[i] = j.measured_deg;
-    telemetry_storage[3 + i] = (float)j.raw;
-    telemetry_storage[6 + i] = j.target_deg;
-    telemetry_storage[9 + i] = j.output;
+    telemetry_snapshot[i] = j.measured_deg;
+    telemetry_snapshot[3 + i] = (float)j.raw;
+    telemetry_snapshot[6 + i] = j.target_deg;
+    telemetry_snapshot[9 + i] = j.output;
   }
-  telemetry_storage[12] = (float)enabled_mask;
-  telemetry_storage[13] = (float)fault_code;
-  telemetry_storage[14] = (float)fault_joint;
-  telemetry_storage[15] = estop_active ? 1.0f : 0.0f;
+  telemetry_snapshot[12] = (float)enabled_mask;
+  telemetry_snapshot[13] = (float)fault_code;
+  telemetry_snapshot[14] = (float)fault_joint;
+  telemetry_snapshot[15] = estop_active ? 1.0f : 0.0f;
+}
+
+void controlTask(void *) {
+  TickType_t wake = xTaskGetTickCount();
+  for (;;) {
+    {
+      StateLock lock;
+      controlStep();
+    }
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
+  }
+}
+
+// Executor timer: publishes the latest control snapshot only.
+void timerCallback(rcl_timer_t *t, int64_t last_call_time) {
+  (void)last_call_time;
+  if (t == NULL) return;
+  {
+    StateLock lock;
+    memcpy(telemetry_storage, telemetry_snapshot, sizeof(telemetry_storage));
+  }
   rcl_publish(&pub_telemetry, &telemetry_msg, NULL);
 }
 
 // ── micro-ROS init ──────────────────────────────────────────────────────────
 void errorLoop() {
   disableAll();
-  writeBase(0.0f);
   while (true) {
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
     delay(100);
@@ -551,7 +565,7 @@ void microrosInit() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/estop", &estop_qos));
 
   RCCHECK(rclc_executor_init(&executor, &support.context, 6, &allocator));
-  // Safety state and targets are processed before the control timer.
+  // Safety state and targets are processed before telemetry publication.
   RCCHECK(rclc_executor_add_subscription(
       &executor, &sub_estop, &estop_msg, estopCallback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
@@ -570,6 +584,10 @@ void microrosInit() {
 void setupOutputsSafe() {
   pinMode(MOTOR_STBY_PIN, OUTPUT);
   digitalWrite(MOTOR_STBY_PIN, LOW);
+  for (const int pin : {BASE_PWM_PIN, BASE_IN1_PIN, BASE_IN2_PIN}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
   for (Joint &j : joints) {
     pinMode(j.in1_pin, OUTPUT);
     pinMode(j.in2_pin, OUTPUT);
@@ -605,12 +623,10 @@ void setup() {
     j.target_deg = 90.0f;  // home pose; never used until targets arrive
     resetPid(j);
   }
+  state_mutex = xSemaphoreCreateMutex();
 
-  ledcSetup(BASE_SERVO_CHANNEL, SERVO_HZ, SERVO_BITS);
-  ledcAttachPin(BASE_SERVO_PIN, BASE_SERVO_CHANNEL);
   ledcSetup(GRIPPER_SERVO_CHANNEL, SERVO_HZ, SERVO_BITS);
   ledcAttachPin(GRIPPER_SERVO_PIN, GRIPPER_SERVO_CHANNEL);
-  writeBase(0.0f);
   writeGripper(0.0f);
 
   Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
@@ -633,24 +649,12 @@ void setup() {
   delay(2000);
   Serial.printf("Initializing micro-ROS agent at %s:%d\n", AGENT_IP, AGENT_PORT);
   microrosInit();
-  last_arm_command_ms = millis();
+  // Core 1 above loop() priority; Wi-Fi runs on core 0.
+  xTaskCreatePinnedToCore(controlTask, "arm_control", 4096, nullptr, 2, nullptr, 1);
   Serial.println("Ready. All joints disabled.");
 }
 
 void loop() {
   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-  const unsigned long now = millis();
-  if (enabled_mask != 0) {
-    if (now - last_target_ms >= TARGET_TIMEOUT_MS) {
-      targets_valid = false;
-      fault(FAULT_TARGET, 0);
-    } else if (now - last_control_ms >= CONTROL_TIMEOUT_MS) {
-      fault(FAULT_CONTROL_TIMEOUT, 0);
-    }
-  }
-  if (now - last_arm_command_ms >= ARM_COMMAND_TIMEOUT_MS && base_velocity != 0.0f) {
-    base_velocity = 0.0f;
-    writeBase(0.0f);
-  }
   delay(5);
 }

@@ -202,16 +202,18 @@ limit; command limits are unchanged.
 
 #### Full-arm H-bridge wiring and calibration
 
-`docs/ligacao_pontes_h_esp32.pdf` is the source of truth for the updated
-two-TB6612 wiring. The document labels map to robot joints as follows:
+`docs/ligacao_pontes_h_esp32.pdf` shows the original two-TB6612 layout; the arm
+is now wired as below (verified by single-joint motor tests):
 
-| Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer |
-|---|---|---:|---:|---:|---:|
-| Shoulder (`Cotovelo 2`) | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 |
-| Elbow (`Cotovelo 1`) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO39 |
-| Wrist (`Pulso`) | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 |
-| Base, 360° servo | Direct servo signal | GPIO25 | — | — | — |
-| Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — |
+| Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer | `direction` |
+|---|---|---:|---:|---:|---:|---:|
+| Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | −1 |
+| Base (DC motor, no feedback) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | — | held LOW |
+| Elbow | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO39 | +1 |
+| Wrist | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO36 | +1 |
+| Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — | — |
+
+The base motor is not controlled yet: firmware drives GPIO17/16/15 LOW from boot.
 
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
 3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
@@ -242,8 +244,8 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 | `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
 | `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 9 values `[Kp,Ki,Kd]` × shoulder/elbow/wrist; only while all disabled |
-| `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints and stops the base |
-| `/arm_command` | `std_msgs/Float32MultiArray` | Only `[0]` base velocity and `[4]` gripper are used; base stops after 1 s of silence |
+| `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
+| `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 16 values (below) |
 
 Telemetry: `[shoulder_deg, elbow_deg, wrist_deg, shoulder_raw, elbow_raw,
@@ -252,13 +254,17 @@ elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles a
 −1 outside the calibration table. Fault codes: 0 none, 1 invalid/stale target,
 2 feedback invalid or outside 80–178°, 3 control timeout, 4 e-stop, 5 runaway
 (error grew 4° beyond its minimum: wrong motor direction, stall, or sag). Any
-fault disables every joint. Output is capped at 25% duty with a 1.5° deadband;
-gains are initial values, not tuned.
+fault disables every joint. Output is capped at 50% duty. Inside the 1.5°
+deadband the controller stops correcting but keeps applying its frozen integral,
+so gravity-loaded joints hold instead of falling. Control runs in a dedicated
+20 Hz FreeRTOS task, independent of Wi-Fi/micro-ROS stalls.
 
-**Commissioning:** motor direction is unverified (`direction = +1` for every
-joint). Enable one joint at a time, starting with a target equal to its measured
-angle, then a small step. A runaway fault (code 5) on the first step means that
-joint's `direction` must be flipped.
+**Commissioning results:** all three directions are verified. Shoulder (Kp 2.0,
+Ki 0.3) and wrist (Kp 4.0, Ki 1.0) reach a 5° step; both need about 10–22% duty
+to break static friction and stick about 2° past the target. The elbow (Kp 4.0,
+Ki 1.0) cannot lift the forearm at 47% duty. Do not raise its cap: MG996R stall
+current exceeds the TB6612's 1.2 A continuous rating. Check VM under load and
+the elbow's mechanical load first. Enable one joint at a time.
 
 ```bash
 ros2 topic pub --rate 10 /arm_joint_targets_deg std_msgs/msg/Float32MultiArray "{data: [90.0, 90.0, 90.0]}"
