@@ -223,24 +223,55 @@ GPIO5 and GPIO15 are ESP32 strapping pins; if the ESP32 does not boot reliably,
 disconnect those driver inputs before power-up and move them in both the wiring
 and firmware before deployment.
 
-`full_arm_controller/full_arm_controller.ino` is the safe calibration image for
-this wiring. It holds shared STBY low, drives every H-bridge command low, leaves
-the base and gripper signal pins undriven, and prints median ADC readings:
-
-```text
-milliseconds,shoulder_gpio34,elbow_gpio39,wrist_gpio36
-```
-
-Build it without uploading or moving hardware:
+`full_arm_controller/full_arm_controller.ino` is the full-arm controller for this
+wiring: position PID for shoulder, elbow, and wrist plus base and gripper servo
+outputs. Copy `wifi_config.example.h` to `wifi_config.h` in that directory (ignored
+by Git) and set `AGENT_IP` to the computer's address on the same 2.4 GHz network.
+The ESP32 cannot join WPA2-Enterprise networks such as eduroam.
 
 ```bash
+docker run --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888
 arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
 ```
 
-Record known-angle points across the elbow and wrist travel before closed-loop
-control is enabled. Each captured calibration table belongs only to its current
-potentiometer, ADC pin, mechanical mounting, and direct-wiper wiring. Never copy
-one joint's table to another or reuse it after rewiring.
+Joint angles are **physical** degrees with 90° as the home pose (arm vertical),
+not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
+
+| Topic | Type | Meaning |
+|---|---|---|
+| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
+| `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 9 values `[Kp,Ki,Kd]` × shoulder/elbow/wrist; only while all disabled |
+| `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints and stops the base |
+| `/arm_command` | `std_msgs/Float32MultiArray` | Only `[0]` base velocity and `[4]` gripper are used; base stops after 1 s of silence |
+| `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 16 values (below) |
+
+Telemetry: `[shoulder_deg, elbow_deg, wrist_deg, shoulder_raw, elbow_raw,
+wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
+elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop]`. Angles are
+−1 outside the calibration table. Fault codes: 0 none, 1 invalid/stale target,
+2 feedback invalid or outside 80–178°, 3 control timeout, 4 e-stop, 5 runaway
+(error grew 4° beyond its minimum: wrong motor direction, stall, or sag). Any
+fault disables every joint. Output is capped at 25% duty with a 1.5° deadband;
+gains are initial values, not tuned.
+
+**Commissioning:** motor direction is unverified (`direction = +1` for every
+joint). Enable one joint at a time, starting with a target equal to its measured
+angle, then a small step. A runaway fault (code 5) on the first step means that
+joint's `direction` must be flipped.
+
+```bash
+ros2 topic pub --rate 10 /arm_joint_targets_deg std_msgs/msg/Float32MultiArray "{data: [90.0, 90.0, 90.0]}"
+ros2 topic pub --once /arm_pid_enable std_msgs/msg/Int32 "{data: 1}"   # shoulder only
+ros2 topic pub --once /arm_pid_enable std_msgs/msg/Int32 "{data: 0}"   # disable all
+```
+
+Calibration tables (`full_arm_controller/*_calibration_*.csv`) belong only to the
+current potentiometers, ADC pins, mounting, and direct-wiper wiring. Shoulder
+values are midpoints of ascending and descending passes; expect about ±3°
+(direction-dependent play). Set `CALIBRATE_MODE 1` to print raw ADC CSV over USB
+with every actuator disabled and Wi-Fi off. Never copy one joint's table to
+another or reuse it after rewiring.
 
 #### Shoulder PID position control (TB6612FNG HW166)
 > **Legacy shoulder-only wiring:** this section documents the previously tested

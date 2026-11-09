@@ -1,0 +1,9 @@
+angle_deg,adc_pin,raw_nominal,source,role
+75,34,1639,ascending_only,guard_only
+90,34,2025,midpoint(2057_asc;1993_desc),operational
+105,34,2406,midpoint(2438_asc;2373_desc),operational
+120,34,2687,midpoint(2762_asc;2612_desc),operational
+135,34,2947,midpoint(3000_asc;2894_desc),operational
+150,34,3160,midpoint(3157_asc;3162_desc),operational
+165,34,3493,midpoint(3501_asc;3484_desc),operational
+180,34,3892,ascending_only,guard_only
