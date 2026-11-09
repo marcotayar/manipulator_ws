@@ -200,7 +200,52 @@ Recalibrate `SHOULDER_CALIBRATION` after changing the divider or wiring, using
 Measured shoulder feedback is displayed without the commanded-motion 10° lower
 limit; command limits are unchanged.
 
+#### Full-arm H-bridge wiring and calibration
+
+`docs/ligacao_pontes_h_esp32.pdf` is the source of truth for the updated
+two-TB6612 wiring. The document labels map to robot joints as follows:
+
+| Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer |
+|---|---|---:|---:|---:|---:|
+| Shoulder (`Cotovelo 2`) | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 |
+| Elbow (`Cotovelo 1`) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO39 |
+| Wrist (`Pulso`) | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 |
+| Base, 360° servo | Direct servo signal | GPIO25 | — | — | — |
+| Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — |
+
+GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
+3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
+GPIO34, GPIO36, and GPIO39 are ADC1 input-only pins and remain usable while
+Wi-Fi is active. Potentiometer dividers must never drive them above 3.3 V.
+GPIO5 and GPIO15 are ESP32 strapping pins; if the ESP32 does not boot reliably,
+disconnect those driver inputs before power-up and move them in both the wiring
+and firmware before deployment.
+
+`full_arm_controller/full_arm_controller.ino` is the safe calibration image for
+this wiring. It holds shared STBY low, drives every H-bridge command low, leaves
+the base and gripper signal pins undriven, and prints median ADC readings:
+
+```text
+milliseconds,shoulder_gpio34,elbow_gpio39,wrist_gpio36
+```
+
+Build it without uploading or moving hardware:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
+```
+
+Record known-angle points across the elbow and wrist travel before closed-loop
+control is enabled. The existing shoulder table is valid only for the calibrated
+shoulder potentiometer and divider on GPIO34. It must not be copied to the elbow
+on GPIO39 or wrist on GPIO36.
+
 #### Shoulder PID position control (TB6612FNG HW166)
+> **Legacy shoulder-only wiring:** this section documents the previously tested
+> standalone shoulder setup. Its GPIO32/14/13/25/26/27 outputs conflict with the
+> updated full-arm wiring above. Do not flash `shoulder_pot_feedback.ino` while
+> the two bridges are wired according to `ligacao_pontes_h_esp32.pdf`.
+
 
 The shoulder is a two-wire DC motor driven by channel B, not a PWM-position servo.
 The standalone sketch retains GPIO34 potentiometer feedback.
