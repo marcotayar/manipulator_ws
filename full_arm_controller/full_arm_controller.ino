@@ -184,7 +184,7 @@ enum Fault : unsigned int {
 
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
-     -1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
+     -1.0f, 5.0f, 3.0f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
     {32, 14, 13, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the elbow
     {23, 22, 21, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
@@ -219,8 +219,9 @@ std_msgs__msg__Bool estop_msg;
 float targets_storage[3];
 float gains_storage[12];
 // Percent duty with the link horizontal. Verified on hardware: wrist 25 (holds at
-// 118 deg); shoulder 10 (holding duty -3.5% at 110 deg, -5.5% at 120 deg).
-float gravity_gain[3] = {10.0f, 0.0f, 25.0f};
+// 118 deg). Shoulder 25: at G 10 it held 135 deg only at -22..-25% total duty and
+// crept outward at 150 deg.
+float gravity_gain[3] = {25.0f, 0.0f, 25.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
