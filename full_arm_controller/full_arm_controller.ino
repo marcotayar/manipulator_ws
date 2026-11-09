@@ -219,8 +219,8 @@ std_msgs__msg__Bool estop_msg;
 float targets_storage[3];
 float gains_storage[12];
 // Percent duty with the link horizontal. Verified on hardware: wrist 25 (holds at
-// 118 deg), shoulder 20 (90->100->90 and 110 hold); elbow not yet identified.
-float gravity_gain[3] = {20.0f, 0.0f, 25.0f};
+// 118 deg); shoulder 10 (holding duty -3.5% at 110 deg, -5.5% at 120 deg).
+float gravity_gain[3] = {10.0f, 0.0f, 25.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
