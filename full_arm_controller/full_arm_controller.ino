@@ -130,7 +130,7 @@ constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
 constexpr float MAX_DUTY = 25.0f;       // percent; not hardware-tuned
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
-constexpr unsigned long CONTROL_TIMEOUT_MS = 150;
+constexpr unsigned long CONTROL_TIMEOUT_MS = 300;  // micro-ROS over Wi-Fi jitters >150 ms
 constexpr unsigned long ARM_COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned int CONTROL_PERIOD_MS = 50;  // 20 Hz
 
@@ -162,7 +162,7 @@ enum Fault : unsigned int {
 
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
-     +1.0f, 0.6f, 0.1f, 0.04f},
+     -1.0f, 2.0f, 0.3f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
     {17, 16, 15, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      +1.0f, 0.6f, 0.1f, 0.04f},
     {32, 14, 13, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
