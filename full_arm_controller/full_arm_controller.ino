@@ -345,6 +345,12 @@ void targetsCallback(const void *msgin) {
   for (int i = 0; i < JOINT_COUNT; ++i) {
     Joint &j = joints[i];
     const float value = msg->data.data[i];
+    // A new target starts a new move: travel toward the old target must not count
+    // as runaway away from the new one.
+    if (fabsf(value - j.target_deg) > 0.5f) {
+      j.runaway_ref_deg = j.measured_deg;
+      j.runaway_pending = false;
+    }
     j.target_deg = value;
   }
   last_target_ms = millis();
