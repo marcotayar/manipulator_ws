@@ -237,11 +237,19 @@ arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
 ```
 
 Joint angles are **physical** degrees with 90° as the home pose (arm vertical),
-not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
+not the `arm_ik_2d.py` frame. Commands are limited to 85° up to a per-joint
+maximum: **shoulder 105°, elbow 100°, wrist 120°**.
+
+> **The arm falls on any fault or disable.** Every fault (stale target,
+> invalid feedback, stall, runaway, e-stop) and every ordinary disable coasts
+> all motors. Beyond the limits above, gearbox friction cannot hold the links:
+> the shoulder sagged from 110° and then fell past its 180° stop, saturating
+> GPIO34 (above 3.3 V). Keep the arm mechanically supported whenever it is away
+> from vertical, and bring joints back near 90° before disabling.
 
 | Topic | Type | Meaning |
 |---|---|---|
-| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
+| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85° to 105/100/120°, refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
 | `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 12 values `[Kp,Ki,Kd,G]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–50% duty with the link horizontal, default 0 |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |

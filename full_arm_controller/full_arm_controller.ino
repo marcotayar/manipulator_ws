@@ -20,7 +20,9 @@
 
   ROS interface (micro-ROS over Wi-Fi, see wifi_config.example.h):
     /arm_joint_targets_deg (Float32MultiArray): exactly [shoulder, elbow, wrist],
-        each 85..175 deg, refreshed at least every 1 s.
+        each 85 deg up to the per-joint limit (shoulder 105, elbow 100, wrist
+        120: beyond these, gearbox friction cannot hold the link when a fault
+        disables the motor), refreshed at least every 1 s.
     /arm_pid_enable (Int32): bitmask, bit0 shoulder, bit1 elbow, bit2 wrist.
         0 disables all. Boots disabled. Enabling requires fresh valid targets,
         valid feedback, and no e-stop.
@@ -132,7 +134,9 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 
 // ── Limits and timing ───────────────────────────────────────────────────────
 constexpr float TARGET_MIN_DEG = 85.0f;
-constexpr float TARGET_MAX_DEG = 175.0f;
+// Any fault coasts every joint, so targets stay where friction holds the link
+// passively (shoulder sagged from 110 deg; wrist held at 118 deg).
+constexpr float TARGET_MAX_DEG[3] = {105.0f, 100.0f, 120.0f};
 constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
@@ -328,7 +332,7 @@ void targetsCallback(const void *msgin) {
   }
   for (int i = 0; i < JOINT_COUNT; ++i) {
     const float value = msg->data.data[i];
-    if (!isfinite(value) || value < TARGET_MIN_DEG || value > TARGET_MAX_DEG) {
+    if (!isfinite(value) || value < TARGET_MIN_DEG || value > TARGET_MAX_DEG[i]) {
       targets_valid = false;
       fault(FAULT_TARGET, i + 1);
       return;
