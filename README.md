@@ -209,8 +209,8 @@ is now wired as below (verified by single-joint motor tests):
 |---|---|---:|---:|---:|---:|---:|
 | Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | −1 |
 | Base (DC motor, no feedback) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | — | held LOW |
-| Elbow | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO39 | +1 |
-| Wrist | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO36 | +1 |
+| Elbow | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO39 | −1 |
+| Wrist | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 | +1 |
 | Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — | — |
 
 The base motor is not controlled yet: firmware drives GPIO17/16/15 LOW from boot.
@@ -218,9 +218,8 @@ The base motor is not controlled yet: firmware drives GPIO17/16/15 LOW from boot
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
 3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
 GPIO34, GPIO36, and GPIO39 are ADC1 input-only pins and remain usable while
-Wi-Fi is active. In the current build each 5 V-referenced potentiometer wiper
-connects directly to its ADC pin; calibrated mechanical travel must keep it below
-3.3 V. There is no hardware overvoltage protection if a stop or connection fails.
+Wi-Fi is active. Each potentiometer is supplied from ESP32 3V3 with a common
+ground, and its wiper connects directly to its ADC pin.
 GPIO5 and GPIO15 are ESP32 strapping pins; if the ESP32 does not boot reliably,
 disconnect those driver inputs before power-up and move them in both the wiring
 and firmware before deployment.

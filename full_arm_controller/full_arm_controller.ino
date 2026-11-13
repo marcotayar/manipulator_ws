@@ -109,10 +109,10 @@ constexpr CalPoint SHOULDER_CAL[] = {
     {1006, 75.0f}, {1263, 90.0f}, {1516, 105.0f}, {1702, 120.0f},
     {1875, 135.0f}, {2016, 150.0f}, {2237, 165.0f}, {2502, 180.0f},
 };
-// Elbow: standardized ascending pass (elbow_calibration_capture.csv).
+// Elbow: replacement potentiometer, fitted from physical 90/135 deg points.
 constexpr CalPoint ELBOW_CAL[] = {
-    {92, 75.0f}, {298, 85.0f}, {407, 90.0f}, {659, 105.0f}, {876, 120.0f},
-    {1185, 135.0f}, {1491, 150.0f}, {1803, 165.0f}, {1922, 175.0f}, {2072, 180.0f},
+    {1840, 75.0f}, {2028, 85.0f}, {2123, 90.0f}, {2406, 105.0f}, {2689, 120.0f},
+    {2972, 135.0f}, {3232, 150.0f}, {3491, 165.0f}, {3664, 175.0f}, {3751, 180.0f},
 };
 // Wrist: decreasing raw with angle (wrist_calibration_capture.csv).
 constexpr CalPoint WRIST_CAL[] = {
@@ -185,10 +185,10 @@ enum Fault : unsigned int {
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
      -1.0f, 5.0f, 3.0f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
-    {32, 14, 13, 39, 1, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
-     +1.0f, 4.0f, 1.0f, 0.04f},  // verified: IN1 HIGH raises the elbow
-    {23, 22, 21, 36, 2, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
-     +1.0f, 5.0f, 2.0f, 0.04f},  // verified: IN1 HIGH raises the wrist
+    {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
+     -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
+    {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
+     +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
 };
 constexpr int JOINT_COUNT = 3;
 
