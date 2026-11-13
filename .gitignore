@@ -6,3 +6,8 @@ __pycache__/
 *.pyo
 /shoulder_pot_feedback/wifi_config.h
 /full_arm_controller/wifi_config.h
+
+# Arduino IDE debug artifacts
+full_arm_controller/debug.cfg
+full_arm_controller/debug_custom.json
+full_arm_controller/esp32.svd
