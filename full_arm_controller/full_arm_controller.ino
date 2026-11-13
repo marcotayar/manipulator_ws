@@ -142,6 +142,10 @@ constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
 constexpr float SAFE_MAX_DEG = 178.0f;
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
+// Runaway only counts when the joint is also this far from its target: the
+// wrist stick-slips 4-6 deg and the shoulder swings ~4.5 deg across gearbox
+// backlash near vertical, both while holding near target.
+constexpr float RUNAWAY_TARGET_DEG[3] = {6.0f, 6.0f, 10.0f};
 constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
 constexpr float SETPOINT_RATE_DEG_S = 8.0f;  // slow enough not to whip the wrist
@@ -502,7 +506,7 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
     j.runaway_sign = sign;
     j.runaway_ref_deg = j.measured_deg;
     j.runaway_pending = false;
-  } else if (sign != 0 && fabsf(j.target_deg - j.measured_deg) > RUNAWAY_DEG &&
+  } else if (sign != 0 && fabsf(j.target_deg - j.measured_deg) > RUNAWAY_TARGET_DEG[index] &&
              (j.measured_deg - j.runaway_ref_deg) * sign < -RUNAWAY_DEG &&
              (j.measured_deg - j.runaway_ref_deg) * (j.target_deg - j.measured_deg) < 0.0f) {
     // Runaway = moved against the push AND away from the target. Gravity carrying
