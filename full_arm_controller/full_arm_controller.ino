@@ -181,7 +181,7 @@ enum Fault : unsigned int {
 
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
-     +1.0f, 5.0f, 3.0f, 0.04f},  // replacement shoulder: IN1 HIGH raises measured angle
+     +1.0f, 3.0f, 2.0f, 0.1f},  // Kp 5 oscillated across gearbox backlash near 90 deg
     {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
@@ -215,10 +215,11 @@ std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
 float targets_storage[3];
 float gains_storage[12];
-// Percent duty with the link horizontal. Hardware hold tests after recalibration:
-// shoulder G=20 held 123 deg at about -10.8% duty; elbow and wrist held at
-// 118/166 deg with G=0, so no feedforward is applied to those joints.
-float gravity_gain[3] = {20.0f, 0.0f, 0.0f};
+// Percent duty with the link horizontal, from powered holds at 135 deg (G = hold
+// duty minus P correction, over sin(lean)): shoulder 33, elbow 28 (held 137.0 deg,
+// 0.02 deg drift). Wrist 25 is needed once the shoulder leans: with G 0 it was
+// dragged outward during a shoulder move.
+float gravity_gain[3] = {33.0f, 28.0f, 25.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
