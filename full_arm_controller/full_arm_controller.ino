@@ -215,10 +215,10 @@ std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
 float targets_storage[3];
 float gains_storage[12];
-// Percent duty with the link horizontal. Verified on hardware: wrist 25 (holds at
-// 118 deg). Shoulder 25: at G 10 it held 135 deg only at -22..-25% total duty and
-// crept outward at 150 deg.
-float gravity_gain[3] = {25.0f, 0.0f, 25.0f};
+// Percent duty with the link horizontal. Hardware hold tests after recalibration:
+// shoulder G=20 held 123 deg at about -10.8% duty; elbow and wrist held at
+// 118/166 deg with G=0, so no feedforward is applied to those joints.
+float gravity_gain[3] = {20.0f, 0.0f, 0.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
