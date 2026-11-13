@@ -100,21 +100,21 @@ struct Joint {
 };
 
 // Potentiometers run from the ESP32 3V3 pin (USB-powered).
-// Shoulder: replacement potentiometer, measured at physical 90/135/180 deg.
+// Shoulder: replacement potentiometer, measured at physical 90/135/165/180 deg.
 // Raw decreases as the shoulder angle increases.
 constexpr CalPoint SHOULDER_CAL[] = {
     {1300, 75.0f}, {1165, 85.0f}, {1098, 90.0f}, {896, 105.0f}, {694, 120.0f},
-    {492, 135.0f}, {360, 150.0f}, {228, 165.0f}, {139, 175.0f}, {96, 180.0f},
+    {492, 135.0f}, {350, 150.0f}, {207, 165.0f}, {133, 175.0f}, {96, 180.0f},
 };
-// Elbow: replacement potentiometer, fitted from physical 90/135 deg points.
+// Elbow: replacement potentiometer, measured at physical 90/135/165/180 deg.
 constexpr CalPoint ELBOW_CAL[] = {
     {1840, 75.0f}, {2028, 85.0f}, {2123, 90.0f}, {2406, 105.0f}, {2689, 120.0f},
-    {2972, 135.0f}, {3232, 150.0f}, {3491, 165.0f}, {3664, 175.0f}, {3751, 180.0f},
+    {2972, 135.0f}, {3194, 150.0f}, {3416, 165.0f}, {3639, 175.0f}, {3751, 180.0f},
 };
-// Wrist: replacement potentiometer, measured at physical 90/135/180 deg.
+// Wrist: replacement potentiometer, measured at physical 90/135/165/180 deg.
 constexpr CalPoint WRIST_CAL[] = {
     {1509, 75.0f}, {1693, 85.0f}, {1785, 90.0f}, {2061, 105.0f}, {2337, 120.0f},
-    {2613, 135.0f}, {3056, 150.0f}, {3499, 165.0f}, {3794, 175.0f}, {3942, 180.0f},
+    {2613, 135.0f}, {3048, 150.0f}, {3482, 165.0f}, {3789, 175.0f}, {3942, 180.0f},
 };
 
 // Piecewise-linear interpolation; works for increasing or decreasing tables.
