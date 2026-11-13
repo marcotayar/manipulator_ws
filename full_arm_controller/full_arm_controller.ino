@@ -111,10 +111,10 @@ constexpr CalPoint ELBOW_CAL[] = {
     {1840, 75.0f}, {2028, 85.0f}, {2123, 90.0f}, {2406, 105.0f}, {2689, 120.0f},
     {2972, 135.0f}, {3232, 150.0f}, {3491, 165.0f}, {3664, 175.0f}, {3751, 180.0f},
 };
-// Wrist: decreasing raw with angle (wrist_calibration_capture.csv).
+// Wrist: replacement potentiometer, measured at physical 90/135/180 deg.
 constexpr CalPoint WRIST_CAL[] = {
-    {2243, 75.0f}, {2133, 85.0f}, {1936, 90.0f}, {1595, 105.0f}, {1194, 120.0f},
-    {1030, 135.0f}, {701, 150.0f}, {458, 165.0f}, {262, 175.0f}, {144, 180.0f},
+    {1509, 75.0f}, {1693, 85.0f}, {1785, 90.0f}, {2061, 105.0f}, {2337, 120.0f},
+    {2613, 135.0f}, {3056, 150.0f}, {3499, 165.0f}, {3794, 175.0f}, {3942, 180.0f},
 };
 
 // Piecewise-linear interpolation; works for increasing or decreasing tables.
