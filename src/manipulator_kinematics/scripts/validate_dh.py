@@ -30,16 +30,16 @@ except ImportError:
 #    J1  |  theta1 |  0.09   |   0     |  pi/2
 #    J2  |  theta2 |   0     |  0.10   |   0
 #    J3  |  theta3 |   0     |  0.09   |   0
-#    J4  |  theta4 |   0     |  0.16   |   0
+#    J4  |  theta4 |   0     |  0.15   |   0
 #
 #  d1 = base_height + turntable = 0.07 + 0.02 = 0.09 m
 #  a2 = link1_length = 0.10 m
 #  a3 = link2_length = 0.09 m
-#  a4 = wrist_to_tip  = 0.16 m  (gripper_base 0.03 + fingers 0.13)
+#  a4 = wrist_to_tip  = 0.15 m  (gripper_base 0.03 + fingers 0.12)
 
 L1 = 0.10  # link1
 L2 = 0.09  # link2
-LG = 0.16  # wrist to EE tip
+LG = 0.15  # wrist to EE tip
 D1 = 0.09  # shoulder height (base + turntable)
 
 robot = rtb.DHRobot(

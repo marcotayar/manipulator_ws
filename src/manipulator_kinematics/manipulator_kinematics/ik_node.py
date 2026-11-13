@@ -29,7 +29,7 @@ import tf2_ros
 
 # Only the gripper offset is needed locally (TF-based EE tip reconstruction).
 # All arm geometry and joint limits live in arm_ik_2d — single source of truth.
-L_GRIP = 0.16        # wrist → EE tip: gripper_base(0.03) + fingers(0.13)
+L_GRIP = 0.15        # wrist → EE tip: gripper_base(0.03) + fingers(0.12)
 
 
 # Simulation loop

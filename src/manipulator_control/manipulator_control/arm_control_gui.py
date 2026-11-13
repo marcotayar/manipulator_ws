@@ -33,10 +33,13 @@ from manipulator_control.signal_plot import SignalPlot
 
 JOINTS = ('shoulder', 'elbow', 'wrist')
 COLORS = ('#4fc3f7', '#ffb74d', '#81c784')
-# Must match full_arm_controller.ino defaults (joints[] and gravity_gain[]).
-DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0), (4.0, 1.0, 0.04, 28.0), (5.0, 2.0, 0.04, 25.0))
+# Must match full_arm_controller.ino defaults (joints[], gravity_gain[],
+# friction_gain[]): Kp, Ki, Kd, G (gravity %), F (friction %).
+DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0, 10.0), (4.0, 1.0, 0.04, 28.0, 12.0),
+                 (5.0, 2.0, 0.04, 25.0, 10.0))
 # Firmware gainsCallback bounds.
-GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0))
+GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0), (0.0, 40.0))
+GAIN_LABELS = ('Kp', 'Ki', 'Kd', 'G %', 'F %')
 FAULTS = {0: 'none', 1: 'stale/invalid target', 2: 'feedback invalid', 3: 'control timeout',
           4: 'e-stop', 5: 'runaway', 6: 'stall'}
 TELEMETRY_TIMEOUT = 0.5
@@ -245,7 +248,7 @@ class ArmControlWindow(QMainWindow):
             spin.editingFinished.connect(lambda i=i, s=spin: self._set_target(i, s.value()))
             g.addWidget(spin, 1, 3)
             spins = []
-            for col, (label, (glo, ghi)) in enumerate(zip(('Kp', 'Ki', 'Kd', 'G %'), GAIN_LIMITS)):
+            for col, (label, (glo, ghi)) in enumerate(zip(GAIN_LABELS, GAIN_LIMITS)):
                 g.addWidget(QLabel(label), 2, col)
                 s = QDoubleSpinBox()
                 s.setRange(glo, ghi)

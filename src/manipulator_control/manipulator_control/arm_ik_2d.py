@@ -8,7 +8,7 @@ Geometry (y = vertical, x = horizontal, base yaw handled separately):
   Shoulder (joint A): fixed at (0, 0.09)
   Link A->B (shoulder->elbow): 0.10 m
   Link B->C (elbow->wrist):    0.09 m
-  Link C->tip (wrist->EE tip): 0.16 m
+  Link C->tip (wrist->EE tip): 0.15 m
   All joints: +/- 90 deg (pi/2)
   Constraint: tip y >= 0
 """
@@ -19,7 +19,7 @@ BASE_X = 0.0
 BASE_Y = 0.09
 L1 = 0.10   # shoulder -> elbow
 L2 = 0.09   # elbow -> wrist
-L3 = 0.16   # wrist -> tip
+L3 = 0.15   # wrist -> tip
 
 # SAFETY: the gripper tip must never go below this height. Below ground the
 # gripper jams into the table and destroys the shoulder gear. Raise for more

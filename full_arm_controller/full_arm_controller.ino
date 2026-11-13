@@ -24,13 +24,15 @@
     /arm_pid_enable (Int32): bitmask, bit0 shoulder, bit1 elbow, bit2 wrist.
         0 disables all. Boots disabled. Enabling requires fresh valid targets,
         valid feedback, and no e-stop.
-    /arm_pid_gains (Float32MultiArray): exactly 12 values
-        [Kp,Ki,Kd,G shoulder, Kp,Ki,Kd,G elbow, Kp,Ki,Kd,G wrist]; accepted only
-        while all joints are disabled and e-stop is released. G is the gravity
-        feedforward in percent duty with the link horizontal (0..80, default 0):
+    /arm_pid_gains (Float32MultiArray): exactly 15 values
+        [Kp,Ki,Kd,G,F shoulder, Kp,Ki,Kd,G,F elbow, Kp,Ki,Kd,G,F wrist]; accepted
+        only while all joints are disabled and e-stop is released. G is the
+        gravity feedforward in percent duty with the link horizontal (0..80):
         feedforward = -G * sin(lean), lean = sum of (angle - 90) from the
-        shoulder out to that joint. (Separate topic impossible: the prebuilt
-        micro-ROS library allows at most 5 subscriptions.)
+        shoulder out to that joint. F is friction feedforward in percent duty
+        (0..40), applied in the direction the setpoint moves and scaled from 0 at
+        rest to full at FRICTION_FULL_SPEED_DEG_S. (Separate topics impossible: the
+        prebuilt micro-ROS library allows at most 5 subscriptions.)
     /estop (Bool, transient-local): true disables all joints.
     /arm_command (Float32MultiArray, existing arm_commander contract): only
         [4] gripper 0 open..1 closed is used.
@@ -97,6 +99,8 @@ struct Joint {
   unsigned long stall_start_ms;  // 0 = output below the cap
   float gravity_ff;       // feedforward duty holding this joint's distal links
   bool runaway_pending;  // require two consecutive violating control samples
+  float setpoint_velocity;        // filtered ramp speed, deg/s (friction feedforward)
+  unsigned long target_changed_ms;  // last time the commanded target moved
 };
 
 // Potentiometers run from the ESP32 3V3 pin (USB-powered).
@@ -149,6 +153,12 @@ constexpr float RUNAWAY_TARGET_DEG[3] = {6.0f, 6.0f, 10.0f};
 constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
 constexpr float SETPOINT_RATE_DEG_S = 8.0f;  // slow enough not to whip the wrist
+// The deadband only applies once the target has been still this long; a target
+// streamed in small steps otherwise lands inside it every tick and the joint
+// advances in deadband-sized jumps.
+constexpr unsigned long TARGET_SETTLE_MS = 300;
+constexpr float FRICTION_FULL_SPEED_DEG_S = 2.0f;
+constexpr float FRICTION_MAX = 40.0f;
 constexpr float SETPOINT_MAX_LAG_DEG = 6.0f;  // ramp waits for a joint held by friction
 constexpr float MAX_DUTY = 80.0f;       // percent; stall cutout protects the TB6612
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
@@ -218,12 +228,16 @@ std_msgs__msg__Int32 enable_msg;
 std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
 float targets_storage[3];
-float gains_storage[12];
+float gains_storage[15];
 // Percent duty with the link horizontal, from powered holds at 135 deg (G = hold
 // duty minus P correction, over sin(lean)): shoulder 33, elbow 28 (held 137.0 deg,
 // 0.02 deg drift). Wrist 25 is needed once the shoulder leans: with G 0 it was
 // dragged outward during a shoulder move.
 float gravity_gain[3] = {33.0f, 28.0f, 25.0f};
+// Percent duty pushed in the direction of setpoint motion. Kinetic friction from
+// the up/down duty difference at 120 deg: shoulder ~14, elbow ~16; defaults stay
+// below it so a breaking-free joint does not overshoot.
+float friction_gain[3] = {10.0f, 12.0f, 10.0f};
 float arm_command_storage[8];
 float telemetry_storage[16];
 std_msgs__msg__Float32MultiArray targets_msg = {};
@@ -274,6 +288,7 @@ void resetPid(Joint &j) {
   j.d_term = 0.0f;
   j.previous_deg = j.measured_deg;
   j.setpoint_deg = j.measured_deg;
+  j.setpoint_velocity = 0.0f;
   j.runaway_ref_deg = j.measured_deg;
   j.runaway_sign = 0;
   j.runaway_pending = false;
@@ -353,6 +368,7 @@ void targetsCallback(const void *msgin) {
       j.runaway_ref_deg = j.measured_deg;
       j.runaway_pending = false;
     }
+    if (fabsf(value - j.target_deg) > 0.01f) j.target_changed_ms = millis();
     j.target_deg = value;
   }
   last_target_ms = millis();
@@ -409,23 +425,25 @@ void enableCallback(const void *msgin) {
 void gainsCallback(const void *msgin) {
   StateLock lock;
   const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
-  if (enabled_mask != 0 || estop_active || msg->data.size != 12) return;
+  if (enabled_mask != 0 || estop_active || msg->data.size != 15) return;
   for (int i = 0; i < JOINT_COUNT; ++i) {
-    const float kp = msg->data.data[4 * i];
-    const float ki = msg->data.data[4 * i + 1];
-    const float kd = msg->data.data[4 * i + 2];
-    const float g = msg->data.data[4 * i + 3];
-    if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || !isfinite(g) ||
+    const float kp = msg->data.data[5 * i];
+    const float ki = msg->data.data[5 * i + 1];
+    const float kd = msg->data.data[5 * i + 2];
+    const float g = msg->data.data[5 * i + 3];
+    const float f = msg->data.data[5 * i + 4];
+    if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || !isfinite(g) || !isfinite(f) ||
         kp < 0.0f || kp > 5.0f || ki < 0.0f || ki > 2.0f || kd < 0.0f || kd > 1.0f ||
-        g < 0.0f || g > MAX_DUTY) {
+        g < 0.0f || g > MAX_DUTY || f < 0.0f || f > FRICTION_MAX) {
       return;  // reject the whole message; never apply a partial update
     }
   }
   for (int i = 0; i < JOINT_COUNT; ++i) {
-    joints[i].kp = msg->data.data[4 * i];
-    joints[i].ki = msg->data.data[4 * i + 1];
-    joints[i].kd = msg->data.data[4 * i + 2];
-    gravity_gain[i] = msg->data.data[4 * i + 3];
+    joints[i].kp = msg->data.data[5 * i];
+    joints[i].ki = msg->data.data[5 * i + 1];
+    joints[i].kd = msg->data.data[5 * i + 2];
+    gravity_gain[i] = msg->data.data[5 * i + 3];
+    friction_gain[i] = msg->data.data[5 * i + 4];
   }
 }
 
@@ -469,13 +487,17 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   j.filtered_velocity += dt / (0.1f + dt) * (velocity - j.filtered_velocity);
   // Ramp the internal setpoint so a large target jump never becomes a large error.
   const float max_step = SETPOINT_RATE_DEG_S * dt;
-  j.setpoint_deg += constrain(j.target_deg - j.setpoint_deg, -max_step, max_step);
+  const float ramp_step = constrain(j.target_deg - j.setpoint_deg, -max_step, max_step);
+  j.setpoint_deg += ramp_step;
+  j.setpoint_velocity += dt / (0.2f + dt) * (ramp_step / dt - j.setpoint_velocity);
   j.setpoint_deg = constrain(j.setpoint_deg, j.measured_deg - SETPOINT_MAX_LAG_DEG,
                              j.measured_deg + SETPOINT_MAX_LAG_DEG);
   const float error = j.setpoint_deg - j.measured_deg;
   const float abs_error = fabsf(error);
+  const bool settled = now - j.target_changed_ms >= TARGET_SETTLE_MS &&
+                       fabsf(j.target_deg - j.setpoint_deg) < 0.01f;
 
-  if (abs_error <= DEADBAND_DEG && fabsf(j.target_deg - j.setpoint_deg) < 0.01f) {
+  if (abs_error <= DEADBAND_DEG && settled) {
     // Inside calibration/backlash uncertainty: stop correcting, but keep applying
     // the frozen integral so a gravity-loaded joint holds instead of falling.
     j.p_term = 0.0f;
@@ -487,13 +509,15 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
     const float candidate_integral =
         constrain(j.integral + j.ki * error * dt, -MAX_DUTY, MAX_DUTY);
     const float pd = j.p_term + j.d_term;
-    const float candidate_output = j.gravity_ff + pd + candidate_integral;
+    const float friction_ff = friction_gain[index] *
+        constrain(j.setpoint_velocity / FRICTION_FULL_SPEED_DEG_S, -1.0f, 1.0f);
+    const float candidate_output = j.gravity_ff + friction_ff + pd + candidate_integral;
     // Conditional integration anti-windup.
     if (!((candidate_output > MAX_DUTY && error > 0.0f) ||
           (candidate_output < -MAX_DUTY && error < 0.0f))) {
       j.integral = candidate_integral;
     }
-    applyDuty(j, j.gravity_ff + pd + j.integral);
+    applyDuty(j, j.gravity_ff + friction_ff + pd + j.integral);
   }
 
   // Runaway: the joint moved RUNAWAY_DEG opposite to the push being applied
@@ -639,7 +663,7 @@ void microrosInit() {
   RCCHECK(rclc_node_init_default(&node, "full_arm_controller", "", &support));
 
   targets_msg.data = {targets_storage, 0, 3};
-  gains_msg.data = {gains_storage, 0, 12};
+  gains_msg.data = {gains_storage, 0, 15};
   arm_command_msg.data = {arm_command_storage, 0, 8};
   telemetry_msg.data = {telemetry_storage, 16, 16};
 

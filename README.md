@@ -18,7 +18,7 @@ ROS 2 Humble workspace for a 4-DOF RRRR desktop manipulator controlled via an ES
 Shoulder origin:  0.09 m above ground  (base 0.07 m + turntable 0.02 m)
 L1  shoulder → elbow:  0.10 m
 L2  elbow → wrist:     0.09 m
-L3  wrist → EE tip:    0.16 m  (gripper_base 0.03 m + fingers 0.13 m)
+L3  wrist → EE tip:    0.15 m  (gripper_base 0.03 m + fingers 0.12 m)
 ```
 
 ## Screenshots
@@ -260,7 +260,7 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 |---|---|---|
 | `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist]`, 85–175°, refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist; 0 disables all; boots disabled |
-| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 12 values `[Kp,Ki,Kd,G]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 15 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal. `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
 | `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 16 values (below) |
