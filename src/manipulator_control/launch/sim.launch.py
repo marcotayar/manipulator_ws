@@ -5,13 +5,12 @@ Simulation: test the IK + control stack without hardware.
   ros2 launch manipulator_control sim.launch.py plant:=pid   # closed-loop PID
 
 Starts robot_state_publisher, arm_commander (IK, publishes /arm_command),
-click_to_target, the Qt control panel and RViz, plus one plant that publishes
-/joint_states:
+click_to_target and RViz, plus one plant that publishes /joint_states:
   plant:=kinematic  ik_node: interpolates to each IK solution (default)
   plant:=pid        pid_sim_node: 200 Hz PID plant driven by /arm_command
 
-Plots in the panel then show the commanded angles against the simulated
-encoders. In RViz select 'Publish Point' and click the grid to set a target.
+In RViz select 'Publish Point' and click the grid to set a target. (The Qt
+panel drives the full_arm_controller firmware and is hardware-only.)
 """
 import os
 
@@ -66,12 +65,6 @@ def generate_launch_description():
             package='manipulator_control',
             executable='click_to_target',
             name='click_to_target',
-            output='screen',
-        ),
-        Node(
-            package='manipulator_control',
-            executable='arm_control_gui',
-            name='arm_control_gui',
             output='screen',
         ),
         Node(

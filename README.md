@@ -147,27 +147,37 @@ ros2 run manipulator_control base_gripper_teleop
 
 See [Hardware control](#hardware-control) below.
 
-### 6. Qt panel + RViz: simulation or real hardware
-
-Two launches, each starting RViz, click-to-target, `arm_commander` and the Qt
-panel. The panel controls base rotation, cylindrical target coordinates
-(azimuth/reach/height) and the positional gripper, and plots joint angles
-(degrees, last 20 s): commanded shoulder/elbow/wrist (dashed), shoulder
-potentiometer (`/shoulder_feedback`) and encoder angles (`/joint_states`).
-Dotted lines are the joint limits; click a legend entry to hide/show a series.
-A warning appears when a joint is within 5° of a limit.
+### 6. Qt panel (real hardware) and RViz simulation
 
 ```bash
-ros2 launch manipulator_control sim.launch.py             # test IK, kinematic plant
+ros2 launch manipulator_control sim.launch.py             # test IK in RViz, kinematic plant
 ros2 launch manipulator_control sim.launch.py plant:=pid  # closed-loop PID plant (section 7)
-ros2 launch manipulator_control hardware.launch.py        # real arm
+ros2 launch manipulator_control hardware.launch.py        # Qt panel for full_arm_controller
 ```
 
-On hardware, RViz mirrors the arm through `shoulder_feedback_bridge`: the
-shoulder follows the potentiometer (falling back to the command if the pot is
-silent for 1 s); elbow, wrist and gripper show the *commanded* values, because
-they have no sensors; the base is not shown (no encoder). The plots only use
-real measurements.
+The simulation launches start RViz, click-to-target and `arm_commander`. The Qt
+panel (`arm_control_gui`) is hardware-only: it talks to `full_arm_controller`
+over `/arm_joint_targets_deg`, `/arm_pid_enable`, `/arm_pid_gains`,
+`/arm_joint_telemetry` and `/estop`.
+
+- **Tuning tab:** per-joint enable, target slider, Kp/Ki/Kd/G (sent only while
+  every joint is disabled; defaults mirror the firmware), and live plots of
+  angle, target and motor duty. Fault code and joint are shown in the header.
+- **Inverse kinematics tab:** click the side view to set a goal for the gripper
+  tip; the tip angle is chosen automatically or set with the slider. With all
+  three joints enabled, **Move along straight line** streams intermediate IK
+  solutions at 20 Hz (3 cm/s, every joint capped at 6°/s, under the firmware's
+  8°/s ramp). If the straight line would cross a joint limit, the move finishes
+  in joint space and the panel says so.
+- **Safety:** targets are seeded from the first telemetry sample and disabled
+  joints keep tracking their measured angle, so enabling never jumps.
+  **Park at 90° & disable** brings every enabled joint to vertical before
+  cutting power (a disabled joint far from vertical falls); **Disable now** cuts
+  power immediately.
+
+Kinematics (`arm_kinematics.py`) use the firmware's physical degrees: 90° is a
+link straight up, larger angles lean outward, and each joint's lean adds to the
+links before it. Targets are limited to 85–175° (wrist 85–170°).
 
 For calibrated shoulder feedback and isolated shoulder PID control, use
 `shoulder_pot_feedback/shoulder_pot_feedback.ino`.
@@ -363,18 +373,9 @@ derivative on measurement with a 0.1 s velocity low-pass filter, and conditional
 integration anti-windup. No minimum-duty kick or gravity compensation is assumed.
 It may respond slowly, stall or oscillate until tuned for the actual load.
 
-**Graphical tuning:** launch `manipulator_control hardware.launch.py` and open
-the **Shoulder PID** tab in the Qt panel. It plots target versus measured angle,
-tracking error, and P/I/D contributions plus actual quantized output duty. Gains
-are shown as confirmed only when firmware telemetry acknowledges them; edits
-alone do not change the controller. Apply gains while disabled. Enter a target
-and click **Send target** (or press Enter) to send one setpoint even while PID is
-disabled; the panel confirms its receipt from firmware telemetry. This does not
-enable motor output. A one-shot target is not kept fresh indefinitely.
-Click **Enable PID** separately to start the 10 Hz target heartbeat, acknowledge
-the target, and request control. Start at the measured position. Stop disables
-PID and stops the heartbeat. Stale telemetry cancels the heartbeat and pending
-enable; reconnecting does not automatically restart motion.
+**Graphical tuning:** the Qt panel (`hardware.launch.py`) drives
+`full_arm_controller`, not this single-joint sketch. Tune this sketch with the
+topics above.
 
 Gain ranges are Kp 0–5, Ki 0–2, Kd 0–1 (finite values only). The ±15% output
 limit is not raised by gain changes. Live tuning means monitoring the response
@@ -472,10 +473,10 @@ those gains on hardware.
 |---|---|---|---|
 | `/joint_states` | `sensor_msgs/JointState` | `keyboard_teleop`, `ik_node`, or `pid_sim` | `robot_state_publisher` |
 | `/joint_setpoint` | `sensor_msgs/JointState` | `pid_sim` | diagnostics/plots |
-| `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm`, `arm_control_gui` | `ik_node`, `arm_commander` |
-| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander`, `ik_node` |
-| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `arm_control_gui`, `base_gripper_teleop` | `arm_commander`, `ik_node` |
-| `/estop` | `std_msgs/Bool` (latched) | `arm_control_gui` | `arm_commander`, `ik_node` |
+| `/target_pose` | `geometry_msgs/Point` | `click_to_target`, `joy_to_arm` | `ik_node`, `arm_commander` |
+| `/base_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_vel_gui`, `base_gripper_teleop`, `keyboard_teleop` | `arm_commander`, `ik_node` |
+| `/gripper_cmd` | `std_msgs/Float32` | `joy_to_arm`, `base_gripper_teleop` | `arm_commander`, `ik_node` |
+| `/estop` | `std_msgs/Bool` (latched) | `arm_control_gui` | `arm_commander`, `ik_node`, `full_arm_controller` |
 | `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_to_arm` |
 | `/arm_command` | `std_msgs/Float32MultiArray` | `arm_commander` | ESP32 (micro-ROS), `pid_sim` |
 | `/pid_diagnostics` | `std_msgs/Float32MultiArray` | `pid_sim` | diagnostics/plots |
@@ -556,7 +557,6 @@ The gamepad connects to the **PC** (USB or Bluetooth), not to the ESP32. The ESP
 Gamepad ──(USB/BT)──▶ PC
                        ├─ joy_node      → /joy
                        ├─ joy_to_arm    → /base_cmd, /target_pose, /gripper_cmd
-                       ├─ arm_control_gui → /base_cmd, /target_pose, /gripper_cmd
                        └─ arm_commander → /arm_command ──(WiFi)──▶ ESP32 servos
 ```
 
@@ -611,12 +611,6 @@ ros2 run manipulator_control joy_to_arm
 ```bash
 ros2 run manipulator_control arm_commander
 ```
-
-> For RViz click-to-target and the base velocity GUI as well, replace terminals 3 and 4 with:
-> ```bash
-> ros2 launch manipulator_control hardware.launch.py
-> ```
-> Then run `joy_to_arm` in a fifth terminal.
 
 ---
 

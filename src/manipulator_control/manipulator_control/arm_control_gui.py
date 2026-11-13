@@ -1,719 +1,570 @@
 #!/usr/bin/env python3
-"""Qt control panel for the physical manipulator.
+"""Qt control panel for full_arm_controller (shoulder, elbow, wrist PID).
 
-The GUI publishes the same high-level topics as the joystick controls. The
-``arm_commander`` node remains responsible for IK, command clamping, and the
-50 Hz command stream sent to the ESP32.
+Tuning tab: per-joint enable, target and Kp/Ki/Kd/G, live angle and duty plots.
+IK tab: click a point on the side view; the tip follows a straight line there
+while the panel streams intermediate IK solutions as joint targets.
+
+Safety rules the panel enforces:
+  * While a joint is disabled its target follows its measured angle, so
+    enabling never jumps.
+  * "Park & disable" drives every enabled joint to 90 deg before cutting
+    power: a disabled joint far from vertical falls.
+  * Gains are only sent while everything is disabled (the firmware ignores
+    them otherwise).
 """
 
 import sys
 import time
-from math import cos, degrees, radians, sin
+from math import hypot
 
-from geometry_msgs.msg import Point
-from std_msgs.msg import Bool, Float32, Float32MultiArray
-
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QPointF, Qt, QTimer
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
-    QDoubleSpinBox,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QPushButton,
-    QScrollArea,
-    QSlider,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
-)
+    QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QMainWindow, QPushButton, QSlider, QTabWidget, QVBoxLayout, QWidget)
+from rclpy.node import Node
+from std_msgs.msg import Bool, Float32MultiArray, Int32
 
-from manipulator_control import arm_ik_2d as ik
+from manipulator_control import arm_kinematics as kin
 from manipulator_control import qt_ros
-from manipulator_control.arm_telemetry import ArmTelemetry
 from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
 from manipulator_control.signal_plot import SignalPlot
-from manipulator_control.shoulder_pid_panel import ShoulderPidPanel, valid_telemetry
+
+JOINTS = ('shoulder', 'elbow', 'wrist')
+COLORS = ('#4fc3f7', '#ffb74d', '#81c784')
+# Must match full_arm_controller.ino defaults (joints[] and gravity_gain[]).
+DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0), (4.0, 1.0, 0.04, 28.0), (5.0, 2.0, 0.04, 25.0))
+# Firmware gainsCallback bounds.
+GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0))
+FAULTS = {0: 'none', 1: 'stale/invalid target', 2: 'feedback invalid', 3: 'control timeout',
+          4: 'e-stop', 5: 'runaway', 6: 'stall'}
+TELEMETRY_TIMEOUT = 0.5
+PARK_DEG = 90.0
+PARK_TOLERANCE = 3.0
+PARK_TIMEOUT = 20.0
+TICK_S = 0.05
+TIP_SPEED = 0.03          # m/s along the straight tip path
+PHI_SPEED = 15.0          # deg/s tip-angle change
+MAX_JOINT_RATE = 6.0      # deg/s per joint; below the firmware's 8 deg/s ramp
 
 
-BASE_SPEED_MIN = 0.1
-BASE_SPEED_MAX = 1.0
-TARGET_STEP = 0.005
-# Spinbox display resolution (3 decimals); the start target is snapped to it.
-TARGET_STEP_MM = 0.001
-REACH_MIN = 0.11
-REACH_MAX = 0.33
-HEIGHT_MIN = 0.00
-HEIGHT_MAX = 0.15
-
-
-class ArmControlNode(ArmTelemetry):
-    """ROS interface kept separate from the Qt widgets."""
+class ArmNode(Node):
+    """ROS side: publishes targets/enable/gains/e-stop, stores telemetry."""
 
     def __init__(self):
         super().__init__('arm_control_gui')
-        self.base_pub = self.create_publisher(Float32, '/base_cmd', 10)
-        self.target_pub = self.create_publisher(Point, '/target_pose', 10)
-        self.gripper_pub = self.create_publisher(Float32, '/gripper_cmd', 10)
+        self.targets_pub = self.create_publisher(Float32MultiArray, '/arm_joint_targets_deg', 10)
+        self.enable_pub = self.create_publisher(Int32, '/arm_pid_enable', 10)
+        self.gains_pub = self.create_publisher(Float32MultiArray, '/arm_pid_gains', 10)
         self.estop_pub = self.create_publisher(Bool, ESTOP_TOPIC, ESTOP_QOS)
-        self.estop_active = False
-        self.create_subscription(Bool, ESTOP_TOPIC, self._estop_cb, ESTOP_QOS)
-        self.pid_target_pub = self.create_publisher(Float32, '/shoulder_target_deg', 10)
-        self.pid_enable_pub = self.create_publisher(Bool, '/shoulder_pid_enable', 10)
-        self.pid_gains_pub = self.create_publisher(
-            Float32MultiArray, '/shoulder_pid_gains', 10)
-        self.pid_telemetry_callback = None
+        self.telemetry = None
+        self.telemetry_time = 0.0
+        self.estop = False
         self.create_subscription(
-            Float32MultiArray, '/shoulder_pid_telemetry', self._pid_telemetry_cb, 10)
+            Float32MultiArray, '/arm_joint_telemetry', self._telemetry_cb, 10)
+        self.create_subscription(Bool, ESTOP_TOPIC, self._estop_cb, ESTOP_QOS)
 
-    def _pid_telemetry_cb(self, msg):
-        values = tuple(msg.data)
-        if self.pid_telemetry_callback is not None:
-            self.pid_telemetry_callback(
-                values if valid_telemetry(values) else None, time.monotonic())
+    def _telemetry_cb(self, msg):
+        if len(msg.data) >= 16:
+            self.telemetry = list(msg.data)
+            self.telemetry_time = time.monotonic()
 
-    def send_pid_target(self, target_deg):
-        msg = Float32()
-        msg.data = float(target_deg)
-        self.pid_target_pub.publish(msg)
+    def _estop_cb(self, msg):
+        self.estop = msg.data
 
-    def send_pid_enable(self, enabled):
-        msg = Bool()
-        msg.data = bool(enabled)
-        self.pid_enable_pub.publish(msg)
+    def fresh(self):
+        return self.telemetry is not None and time.monotonic() - self.telemetry_time < TELEMETRY_TIMEOUT
 
-    def send_pid_gains(self, gains):
-        msg = Float32MultiArray()
-        msg.data = list(gains)
-        self.pid_gains_pub.publish(msg)
+    def send_targets(self, targets):
+        self.targets_pub.publish(Float32MultiArray(data=[float(t) for t in targets]))
 
-    def stop_all(self):
-        self.send_pid_enable(False)
-        self.send_base(0.0)
+    def send_enable(self, mask):
+        self.enable_pub.publish(Int32(data=int(mask)))
 
-    def _estop_cb(self, msg: Bool):
-        self.estop_active = bool(msg.data)
+    def send_gains(self, gains):
+        self.gains_pub.publish(Float32MultiArray(data=[float(g) for row in gains for g in row]))
 
-    def send_estop(self, engaged: bool):
-        msg = Bool()
-        msg.data = bool(engaged)
-        self.estop_pub.publish(msg)
+    def send_estop(self, engaged):
+        self.estop_pub.publish(Bool(data=engaged))
 
-    def send_base(self, velocity: float):
-        msg = Float32()
-        msg.data = float(max(-1.0, min(1.0, velocity)))
-        self.base_pub.publish(msg)
+    def shutdown(self):
+        self.send_enable(0)
 
-    def send_target(self, x: float, y: float, z: float):
-        msg = Point()
-        msg.x = float(x)
-        msg.y = float(y)
-        msg.z = float(z)
-        self.target_pub.publish(msg)
 
-    def send_gripper(self, position: float):
-        msg = Float32()
-        msg.data = float(max(0.0, min(1.0, position)))
-        self.gripper_pub.publish(msg)
+def clamp_target(i, value):
+    lo, hi = kin.JOINT_LIMITS[i]
+    return max(lo, min(hi, value))
+
+
+class ArmView(QWidget):
+    """Side view (reach x height) of the arm; click to pick an IK goal."""
+
+    R_MIN, R_MAX, Z_MIN, Z_MAX = -0.12, 0.48, -0.02, 0.48
+
+    def __init__(self, on_click):
+        super().__init__()
+        self.on_click = on_click
+        self.measured = None
+        self.target = None
+        self.goal = None
+        self.goal_ok = True
+        self.setMinimumSize(420, 360)
+
+    def _scale(self):
+        sx = self.width() / (self.R_MAX - self.R_MIN)
+        sz = self.height() / (self.Z_MAX - self.Z_MIN)
+        return min(sx, sz)
+
+    def to_px(self, r, z):
+        s = self._scale()
+        return QPointF((r - self.R_MIN) * s, self.height() - (z - self.Z_MIN) * s)
+
+    def from_px(self, x, y):
+        s = self._scale()
+        return x / s + self.R_MIN, (self.height() - y) / s + self.Z_MIN
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.on_click(*self.from_px(event.x(), event.y()))
+
+    def _draw_arm(self, p, q, color, dashed):
+        pen = QPen(QColor(color), 5 if not dashed else 2)
+        if dashed:
+            pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        pts = [self.to_px(r, z) for r, z in kin.forward_points(q)]
+        for a, b in zip(pts, pts[1:]):
+            p.drawLine(a, b)
+        p.setBrush(QColor(color))
+        for pt in pts[:-1]:
+            p.drawEllipse(pt, 4, 4)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor('#1d2227'))
+        p.setPen(QPen(QColor('#323b44'), 1))
+        for i in range(-1, 5):
+            v = i * 0.1
+            p.drawLine(self.to_px(v, self.Z_MIN), self.to_px(v, self.Z_MAX))
+            p.drawLine(self.to_px(self.R_MIN, v), self.to_px(self.R_MAX, v))
+        p.setPen(QPen(QColor('#9ba8b4'), 2))
+        p.drawLine(self.to_px(self.R_MIN, 0.0), self.to_px(self.R_MAX, 0.0))
+        p.setFont(QFont('Sans', 8))
+        p.drawText(8, 16, 'reach (m) →   height (m) ↑   grid 0.1 m')
+        if self.target is not None:
+            self._draw_arm(p, self.target, '#ffb74d', dashed=True)
+        if self.measured is not None:
+            self._draw_arm(p, self.measured, '#4fc3f7', dashed=False)
+        if self.goal is not None:
+            p.setPen(QPen(QColor('#81c784' if self.goal_ok else '#e57373'), 2))
+            p.setBrush(Qt.NoBrush)
+            c = self.to_px(*self.goal)
+            p.drawEllipse(c, 7, 7)
+            p.drawLine(c + QPointF(-10, 0), c + QPointF(10, 0))
+            p.drawLine(c + QPointF(0, -10), c + QPointF(0, 10))
+        p.setPen(QColor('#9ba8b4'))
+        p.drawText(8, self.height() - 8, 'solid: measured   dashed: target   +: goal')
 
 
 class ArmControlWindow(QMainWindow):
-    def __init__(self, node: ArmControlNode):
+    def __init__(self, node: ArmNode):
         super().__init__()
         self.node = node
-        self._base_is_moving = False
-
-        self.setWindowTitle('Manipulator Control')
-        self.setMinimumWidth(560)
-        self.setStyleSheet(self._style_sheet())
+        self.setWindowTitle('Manipulator — tuning & IK')
+        self.targets = [90.0, 90.0, 90.0]
+        self.requested_mask = 0
+        self.parking = None          # park deadline while parking, else None
+        self.path_goal = None        # (r, z, phi, q) while streaming an IK path
+        self.path_joint_mode = False  # straight line blocked: finishing in joint space
+        self.auto_phi = True
+        # Targets are unknown until the first telemetry sample: the arm may
+        # already be enabled by another client, so never publish defaults.
+        self.targets_seeded = False
+        self.t0 = time.monotonic()
 
         central = QWidget()
-        outer = QHBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        left = QWidget()
-        root = QVBoxLayout(left)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(14)
-        controls_scroll = QScrollArea()
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setWidget(left)
-        controls_scroll.setMinimumWidth(400)
-        outer.addWidget(controls_scroll)
+        root = QVBoxLayout(central)
+        root.addLayout(self._build_status_bar())
+        tabs = QTabWidget()
+        tabs.addTab(self._build_tuning_tab(), 'Tuning')
+        tabs.addTab(self._build_ik_tab(), 'Inverse kinematics')
+        root.addWidget(tabs)
         self.setCentralWidget(central)
+        self.resize(1100, 820)
 
-        title = QLabel('Manipulator Control')
-        title.setObjectName('title')
-        subtitle = QLabel(
-            'Cylindrical targets, base velocity, and gripper position')
-        subtitle.setObjectName('subtitle')
-        root.addWidget(title)
-        root.addWidget(subtitle)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(int(TICK_S * 1000))
 
-        self.status_label = QLabel('Waiting for arm_commander…')
-        self.status_label.setObjectName('statusWaiting')
-        root.addWidget(self.status_label)
+    # ── Layout ──────────────────────────────────────────────────────────────
+    def _build_status_bar(self):
+        bar = QHBoxLayout()
+        self.status_label = QLabel('waiting for /arm_joint_telemetry…')
+        self.status_label.setStyleSheet('font-weight: bold;')
+        bar.addWidget(self.status_label, 1)
+        self.enable_all_btn = QPushButton('Enable all')
+        self.enable_all_btn.clicked.connect(lambda: self._request_mask(7))
+        self.park_btn = QPushButton('Park at 90° && disable')
+        self.park_btn.clicked.connect(self._start_park)
+        self.disable_btn = QPushButton('Disable now')
+        self.disable_btn.setToolTip('Cuts power immediately: a joint far from vertical will fall.')
+        self.disable_btn.clicked.connect(lambda: self._request_mask(0))
+        self.estop_btn = QPushButton('E-STOP')
+        self.estop_btn.setStyleSheet('background:#c62828; color:white; font-weight:bold;')
+        self.estop_btn.clicked.connect(self._toggle_estop)
+        for w in (self.enable_all_btn, self.park_btn, self.disable_btn, self.estop_btn):
+            bar.addWidget(w)
+        return bar
 
-        self.estop_button = QPushButton('EMERGENCY STOP')
-        self.estop_button.setMinimumHeight(54)
-        self.estop_button.clicked.connect(self._toggle_estop)
-        self._estop_ui = None
-        root.addWidget(self.estop_button)
+    def _build_tuning_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        joints_row = QHBoxLayout()
+        self.enable_boxes, self.sliders, self.target_spins = [], [], []
+        self.measured_labels, self.gain_spins = [], []
+        for i, name in enumerate(JOINTS):
+            box = QGroupBox(name.capitalize())
+            g = QGridLayout(box)
+            enable = QCheckBox('enabled')
+            enable.toggled.connect(self._enable_boxes_changed)
+            g.addWidget(enable, 0, 0, 1, 2)
+            measured = QLabel('—')
+            g.addWidget(measured, 0, 2, 1, 2)
+            lo, hi = kin.JOINT_LIMITS[i]
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(lo * 2), int(hi * 2))
+            slider.valueChanged.connect(lambda v, i=i: self._set_target(i, v / 2.0))
+            g.addWidget(slider, 1, 0, 1, 3)
+            spin = QDoubleSpinBox()
+            spin.setRange(lo, hi)
+            spin.setDecimals(1)
+            spin.setSingleStep(0.5)
+            spin.setSuffix('°')
+            spin.editingFinished.connect(lambda i=i, s=spin: self._set_target(i, s.value()))
+            g.addWidget(spin, 1, 3)
+            spins = []
+            for col, (label, (glo, ghi)) in enumerate(zip(('Kp', 'Ki', 'Kd', 'G %'), GAIN_LIMITS)):
+                g.addWidget(QLabel(label), 2, col)
+                s = QDoubleSpinBox()
+                s.setRange(glo, ghi)
+                s.setDecimals(2)
+                s.setSingleStep(0.1 if ghi <= 5 else 1.0)
+                s.setValue(DEFAULT_GAINS[i][col])
+                g.addWidget(s, 3, col)
+                spins.append(s)
+            self.enable_boxes.append(enable)
+            self.sliders.append(slider)
+            self.target_spins.append(spin)
+            self.measured_labels.append(measured)
+            self.gain_spins.append(spins)
+            joints_row.addWidget(box)
+        layout.addLayout(joints_row)
 
-        self.limit_label = QLabel('')
-        self.limit_label.setObjectName('eventWarning')
-        self.limit_label.setWordWrap(True)
-        self.limit_label.hide()
-        root.addWidget(self.limit_label)
+        gains_row = QHBoxLayout()
+        self.send_gains_btn = QPushButton('Send gains to ESP32')
+        self.send_gains_btn.clicked.connect(self._send_gains)
+        reset = QPushButton('Reset to firmware defaults')
+        reset.clicked.connect(self._reset_gains)
+        self.gains_note = QLabel('Gains are accepted only while every joint is disabled.')
+        gains_row.addWidget(self.send_gains_btn)
+        gains_row.addWidget(reset)
+        gains_row.addWidget(self.gains_note, 1)
+        layout.addLayout(gains_row)
 
-        self.control_groups = [
-            self._build_base_group(),
-            self._build_target_group(),
-            self._build_gripper_group(),
-        ]
-        for group in self.control_groups:
-            root.addWidget(group)
+        self.angle_plot = SignalPlot(unit='°', window=20.0, title='Angle (solid) and target (dashed)')
+        self.duty_plot = SignalPlot(unit='%', window=20.0, title='Motor duty')
+        for name, color in zip(JOINTS, COLORS):
+            self.angle_plot.add_series(name, color)
+            self.angle_plot.add_series(f'{name} target', color, dashed=True)
+            self.duty_plot.add_series(name, color)
+        layout.addWidget(self.angle_plot, 3)
+        layout.addWidget(self.duty_plot, 2)
+        return tab
 
-        self.feedback_label = QLabel('No /arm_command received yet.')
-        self.feedback_label.setObjectName('feedback')
-        self.feedback_label.setWordWrap(True)
-        self.feedback_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        root.addWidget(self.feedback_label)
+    def _build_ik_tab(self):
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+        self.view = ArmView(self._ik_goal_clicked)
+        layout.addWidget(self.view, 3)
+        side = QVBoxLayout()
+        side.addWidget(QLabel('Click the view to set a goal for the gripper tip.'))
+        self.auto_phi_box = QCheckBox('Choose tip angle automatically')
+        self.auto_phi_box.setChecked(True)
+        self.auto_phi_box.toggled.connect(self._auto_phi_changed)
+        side.addWidget(self.auto_phi_box)
+        side.addWidget(QLabel('Tip angle from vertical (0 up, 90 horizontal, 180 down)'))
+        self.phi_slider = QSlider(Qt.Horizontal)
+        self.phi_slider.setRange(0, 180)
+        self.phi_slider.setValue(90)
+        self.phi_slider.setEnabled(False)
+        self.phi_slider.valueChanged.connect(self._phi_changed)
+        side.addWidget(self.phi_slider)
+        self.phi_label = QLabel('90°')
+        side.addWidget(self.phi_label)
+        self.goal_label = QLabel('goal: —')
+        self.goal_label.setWordWrap(True)
+        side.addWidget(self.goal_label)
+        self.go_btn = QPushButton('Move along straight line')
+        self.go_btn.clicked.connect(self._start_path)
+        self.stop_path_btn = QPushButton('Stop motion (hold here)')
+        self.stop_path_btn.clicked.connect(self._stop_path)
+        side.addWidget(self.go_btn)
+        side.addWidget(self.stop_path_btn)
+        self.path_label = QLabel('Requires all three joints enabled.')
+        self.path_label.setWordWrap(True)
+        side.addWidget(self.path_label)
+        side.addStretch(1)
+        layout.addLayout(side, 1)
+        self.ik_goal = None  # (r, z, phi, q)
+        return tab
 
-        self.feedback_pot_label = QLabel('Potentiometer: no /shoulder_feedback yet.')
-        self.feedback_pot_label.setObjectName('feedback')
-        root.addWidget(self.feedback_pot_label)
-        graph_tabs = QTabWidget()
-        graph_tabs.setMinimumWidth(500)
-        graph_tabs.addTab(self._build_plot_panel(), 'Joint graphs')
-        self.pid_panel = ShoulderPidPanel(node)
-        graph_tabs.addTab(self.pid_panel, 'Shoulder PID tuning')
-        outer.addWidget(graph_tabs, 1)
-        self.resize(1120, 780)
-        # aboutToQuit also covers SIGINT and app.quit(), not only window close.
-        from PyQt5.QtWidgets import QApplication
-        QApplication.instance().aboutToQuit.connect(self.pid_panel.shutdown)
+    # ── Telemetry helpers ───────────────────────────────────────────────────
+    def _telemetry(self):
+        return self.node.telemetry if self.node.fresh() else None
 
-        self.event_label = QLabel('Ready')
-        self.event_label.setObjectName('event')
-        root.addWidget(self.event_label)
+    def _mask(self):
+        t = self._telemetry()
+        return int(t[12]) if t else 0
 
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._refresh_status)
-        self.status_timer.start(250)
+    def _measured(self):
+        t = self._telemetry()
+        return t[:3] if t else None
 
-        self.plot_timer = QTimer(self)
-        self.plot_timer.timeout.connect(self._sample_plot)
-        self.plot_timer.start(50)
+    # ── Commands ────────────────────────────────────────────────────────────
+    def _request_mask(self, mask):
+        if mask == 0:
+            self.parking = None
+            self.path_goal = None
+        self.requested_mask = mask
+        self.node.send_targets(self.targets)
+        self.node.send_enable(mask)
+        for i, box in enumerate(self.enable_boxes):
+            box.blockSignals(True)
+            box.setChecked(bool(mask & (1 << i)))
+            box.blockSignals(False)
 
-        self._apply_estop(False)
-        self._set_event('Ready')
+    def _enable_boxes_changed(self):
+        mask = sum(1 << i for i, b in enumerate(self.enable_boxes) if b.isChecked())
+        self._request_mask(mask)
 
-    def _build_plot_panel(self):
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 18, 18, 18)
-        heading = QLabel('Joint angles (click legend to toggle)')
-        heading.setObjectName('subtitle')
-        layout.addWidget(heading)
-        self.plot = SignalPlot(unit='deg', window=20.0)
-        for name, color, dashed in (
-                ('Shoulder cmd', '#4cb4ff', True),
-                ('Elbow cmd', '#ff5fa2', True),
-                ('Wrist cmd', '#ffc857', True),
-                ('Shoulder pot', '#2dd4bf', False),
-                ('Shoulder enc', '#1d8fe0', False),
-                ('Elbow enc', '#e0357f', False),
-                ('Wrist enc', '#e0a82e', False)):
-            self.plot.add_series(name, color, dashed)
-        # Joint limits (dotted), tied to the matching command series.
-        for name, lo, hi in (
-                ('Shoulder cmd', ik.SH_MIN, ik.SH_MAX),
-                ('Elbow cmd', ik.EL_MIN, ik.EL_MAX),
-                ('Wrist cmd', ik.WR_MIN, ik.WR_MAX)):
-            self.plot.add_limit(name, degrees(lo))
-            self.plot.add_limit(name, degrees(hi))
-        layout.addWidget(self.plot, 1)
-        panel.setMinimumWidth(480)
-        return panel
+    def _set_target(self, i, value):
+        self.path_goal = None
+        self.targets[i] = clamp_target(i, value)
+        self._sync_target_widgets(i)
 
-    def _sample_plot(self):
-        now = time.monotonic()
-        node = self.node
+    def _sync_target_widgets(self, i):
+        for w, v in ((self.sliders[i], int(round(self.targets[i] * 2))),
+                     (self.target_spins[i], self.targets[i])):
+            w.blockSignals(True)
+            w.setValue(v)
+            w.blockSignals(False)
 
-        if node.is_fresh(node.last_command_time, now):
-            for name, value in zip(
-                    ('Shoulder cmd', 'Elbow cmd', 'Wrist cmd'),
-                    node.last_command[1:4]):
-                self.plot.push(name, now, degrees(value))
-        if node.is_fresh(node.last_feedback_time, now):
-            self.plot.push('Shoulder pot', now, degrees(node.last_feedback))
-        if node.is_fresh(node.last_joints_time, now):
-            for name, value in zip(
-                    ('Shoulder enc', 'Elbow enc', 'Wrist enc'),
-                    node.last_joints):
-                self.plot.push(name, now, degrees(value))
-        self.plot.advance(now)
-
-    LIMIT_WARN_MARGIN = radians(5)
-
-    def _limit_warnings(self):
-        """Joints (measured, else commanded) within the margin of a limit."""
-        node = self.node
-        measured = node.measured_joints()
-        command = (node.last_command[1:4]
-                   if node.is_fresh(node.last_command_time) else (None,) * 3)
-        warnings = []
-        for name, meas, cmd, lo, hi in zip(
-                ('shoulder', 'elbow', 'wrist'), measured, command,
-                (ik.SH_MIN, ik.EL_MIN, ik.WR_MIN),
-                (ik.SH_MAX, ik.EL_MAX, ik.WR_MAX)):
-            value = meas if meas is not None else cmd
-            if value is None:
-                continue
-            if value < lo - ik.LIMIT_EPS or value > hi + ik.LIMIT_EPS:
-                warnings.append(f'{name} {degrees(value):.0f}° OUT of limits')
-            elif value - lo < self.LIMIT_WARN_MARGIN:
-                warnings.append(f'{name} {degrees(value - lo):.0f}° from min')
-            elif hi - value < self.LIMIT_WARN_MARGIN:
-                warnings.append(f'{name} {degrees(hi - value):.0f}° from max')
-        return warnings
+    def _start_park(self):
+        if self._mask() == 0:
+            return
+        self.path_goal = None
+        for i in range(3):
+            self.targets[i] = PARK_DEG
+            self._sync_target_widgets(i)
+        self.parking = time.monotonic() + PARK_TIMEOUT
 
     def _toggle_estop(self):
-        engaged = not self.node.estop_active
-        self.node.estop_active = engaged
-        self.node.send_estop(engaged)
-        self._apply_estop(engaged)
+        self.node.send_estop(not self.node.estop)
+        self.node.estop = not self.node.estop
 
-    def _apply_estop(self, engaged):
-        self._estop_ui = engaged
-        if engaged:
-            self.pid_panel.emergency_stop()
-            self._base_is_moving = False
-            self.node.send_base(0.0)
-            self.estop_button.setText('STOPPED — click to RELEASE')
-            self.estop_button.setStyleSheet(
-                'background: #f0b429; color: #111; font-size: 16px;'
-                'font-weight: 800; border-radius: 6px;')
-            self._set_event('Emergency stop engaged: base stopped, arm frozen',
-                            warning=True)
-        else:
-            self.estop_button.setText('EMERGENCY STOP')
-            self.estop_button.setStyleSheet(
-                'background: #c62828; color: white; font-size: 18px;'
-                'font-weight: 800; border-radius: 6px;')
-            self._set_event('Emergency stop released')
-        for group in self.control_groups:
-            group.setEnabled(not engaged)
-
-    @staticmethod
-    def _icon_button(symbol, tooltip, object_name=None):
-        """Square symbol button. The tooltip carries the wording it replaces."""
-        button = QPushButton(symbol)
-        button.setToolTip(tooltip)
-        button.setObjectName(object_name or 'iconButton')
-        return button
-
-    def _build_base_group(self):
-        group = QGroupBox('Base rotation  ⟳')
-        layout = QVBoxLayout(group)
-
-        speed_row = QHBoxLayout()
-        speed_icon = QLabel('»')
-        speed_icon.setObjectName('fieldIcon')
-        speed_icon.setToolTip('Rotation speed')
-        speed_row.addWidget(speed_icon)
-        self.base_speed = QSlider(Qt.Horizontal)
-        self.base_speed.setRange(
-            round(BASE_SPEED_MIN * 100), round(BASE_SPEED_MAX * 100))
-        self.base_speed.setValue(50)
-        self.base_speed.setToolTip('Rotation speed')
-        self.base_speed.valueChanged.connect(self._update_speed_label)
-        speed_row.addWidget(self.base_speed, 1)
-        self.speed_label = QLabel('0.50')
-        self.speed_label.setMinimumWidth(38)
-        speed_row.addWidget(self.speed_label)
-        layout.addLayout(speed_row)
-
-        buttons = QHBoxLayout()
-        # Spatial order: counter-clockwise on the left, clockwise on the right.
-        left = self._icon_button('↺', 'Hold to rotate left (counter-clockwise)')
-        stop = self._icon_button('■', 'Stop base', 'stopButton')
-        right = self._icon_button('↻', 'Hold to rotate right (clockwise)')
-
-        left.pressed.connect(lambda: self._start_base(1.0))
-        left.released.connect(self._stop_base)
-        right.pressed.connect(lambda: self._start_base(-1.0))
-        right.released.connect(self._stop_base)
-        stop.clicked.connect(self._stop_base)
-
-        buttons.addWidget(left)
-        buttons.addWidget(stop)
-        buttons.addWidget(right)
-        layout.addLayout(buttons)
-
-        hint = QLabel('Hold ↺ / ↻ to spin — releasing stops the base.')
-        hint.setObjectName('hint')
-        layout.addWidget(hint)
-        return group
-
-    def _build_target_group(self):
-        group = QGroupBox('End-effector target  ✛')
-        layout = QVBoxLayout(group)
-
-        start_reach, start_height = self._start_target()
-
-        self.reach = self._distance_spinbox(
-            REACH_MIN, REACH_MAX, start_reach)
-        self.reach.setToolTip('Reach from base axis')
-        self.height = self._distance_spinbox(
-            HEIGHT_MIN, HEIGHT_MAX, start_height)
-        self.height.setToolTip('Tip height above ground')
-        self.azimuth = QDoubleSpinBox()
-        self.azimuth.setDecimals(0)
-        self.azimuth.setSingleStep(5.0)
-        self.azimuth.setRange(-180.0, 180.0)
-        self.azimuth.setValue(0.0)
-        self.azimuth.setSuffix('°')
-        self.azimuth.setKeyboardTracking(False)
-        self.azimuth.setToolTip('Base azimuth (yaw) of the target')
-
-        fields = QGridLayout()
-        for row, (symbol, tip, widget) in enumerate((
-            ('∠', 'Base azimuth (yaw)', self.azimuth),
-            ('⟷', 'Reach from base axis', self.reach),
-            ('↕', 'Height above ground', self.height),
-        )):
-            icon = QLabel(symbol)
-            icon.setObjectName('fieldIcon')
-            icon.setToolTip(tip)
-            icon.setAlignment(Qt.AlignCenter)
-            fields.addWidget(icon, row, 0)
-            fields.addWidget(widget, row, 1)
-        fields.setColumnStretch(1, 1)
-        layout.addLayout(fields)
-
-        # Jog pad laid out the way the arm moves: up/down = height,
-        # left/right = reach, centre = return to the safe start pose.
-        pad = QGridLayout()
-        pad.setSpacing(6)
-        raise_arm = self._icon_button('▲', f'Raise {TARGET_STEP * 1000:.0f} mm')
-        lower = self._icon_button('▼', f'Lower {TARGET_STEP * 1000:.0f} mm')
-        reach_less = self._icon_button(
-            '◀', f'Reach in {TARGET_STEP * 1000:.0f} mm')
-        reach_more = self._icon_button(
-            '▶', f'Reach out {TARGET_STEP * 1000:.0f} mm')
-        safe_start = self._icon_button('⌂', 'Go to safe start target')
-
-        raise_arm.clicked.connect(lambda: self._jog_target(0.0, TARGET_STEP))
-        lower.clicked.connect(lambda: self._jog_target(0.0, -TARGET_STEP))
-        reach_less.clicked.connect(lambda: self._jog_target(-TARGET_STEP, 0.0))
-        reach_more.clicked.connect(lambda: self._jog_target(TARGET_STEP, 0.0))
-        safe_start.clicked.connect(self._send_safe_start)
-
-        pad.addWidget(raise_arm, 0, 1)
-        pad.addWidget(reach_less, 1, 0)
-        pad.addWidget(safe_start, 1, 1)
-        pad.addWidget(reach_more, 1, 2)
-        pad.addWidget(lower, 2, 1)
-
-        pad_row = QHBoxLayout()
-        pad_row.addStretch(1)
-        pad_row.addLayout(pad)
-        pad_row.addStretch(1)
-        layout.addLayout(pad_row)
-
-        move = self._icon_button('➤  Move', 'Send the target to the arm',
-                                 'primaryButton')
-        layout.addWidget(move)
-        move.clicked.connect(self._send_target)
-
-        polar_hint = QLabel(
-            '∠ azimuth · ⟷ reach · ↕ height. Simulation solves ∠ as J1; '
-            'physical J1 stays manual without an encoder.')
-        polar_hint.setObjectName('hint')
-        polar_hint.setWordWrap(True)
-        layout.addWidget(polar_hint)
-        return group
-
-    def _build_gripper_group(self):
-        group = QGroupBox('Gripper  ⊑⊒')
-        layout = QVBoxLayout(group)
-
-        # Slider runs left (open) to right (closed), so the end labels show the
-        # finger pair spread apart and pressed together.
-        position_row = QHBoxLayout()
-        open_icon = QLabel('◀   ▶')
-        open_icon.setObjectName('fieldIcon')
-        open_icon.setToolTip('Open')
-        position_row.addWidget(open_icon)
-        self.gripper = QSlider(Qt.Horizontal)
-        self.gripper.setRange(0, 100)
-        self.gripper.setValue(0)
-        self.gripper.setToolTip('Gripper position: left open, right closed')
-        self.gripper.valueChanged.connect(self._update_gripper_label)
-        self.gripper.sliderReleased.connect(self._send_gripper)
-        position_row.addWidget(self.gripper, 1)
-        closed_icon = QLabel('▶ ◀')
-        closed_icon.setObjectName('fieldIcon')
-        closed_icon.setToolTip('Closed')
-        position_row.addWidget(closed_icon)
-        self.gripper_label = QLabel('0%')
-        self.gripper_label.setMinimumWidth(38)
-        position_row.addWidget(self.gripper_label)
-        layout.addLayout(position_row)
-
-        buttons = QHBoxLayout()
-        open_button = self._icon_button('◀   ▶', 'Open fully')
-        # '✔' measures ~82 ink px at 24 px vs '✓' at 53 (offscreen render
-        # check), so it stays legible at button size.
-        apply_button = self._icon_button(
-            '✔', 'Send the slider position', 'primaryIconButton')
-        close_button = self._icon_button('▶ ◀', 'Close fully')
-        open_button.clicked.connect(lambda: self._set_gripper(0))
-        apply_button.clicked.connect(self._send_gripper)
-        close_button.clicked.connect(lambda: self._set_gripper(100))
-        buttons.addWidget(open_button)
-        buttons.addWidget(apply_button)
-        buttons.addWidget(close_button)
-        layout.addLayout(buttons)
-        return group
-
-    @staticmethod
-    def _distance_spinbox(minimum, maximum, value):
-        spin = QDoubleSpinBox()
-        spin.setDecimals(3)
-        spin.setSingleStep(TARGET_STEP)
-        spin.setRange(minimum, maximum)
-        spin.setValue(value)
-        spin.setSuffix(' m')
-        spin.setKeyboardTracking(False)
-        return spin
-
-    @staticmethod
-    def _start_target():
-        """Safe-start tip target, snapped to a value the spinboxes can hold.
-
-        The raw FK of the start pose sits on the workspace boundary, so the
-        3-decimal spinbox rounding can land outside it. Snapping keeps the
-        displayed default sendable.
-        """
-        reach, height = ik.forward(
-            ik.START_SHOULDER, ik.START_ELBOW, ik.START_WRIST)
-        snapped = ik.nearest_feasible(reach, height, step=TARGET_STEP_MM)
-        return snapped if snapped is not None else (reach, height)
-
-    def _update_speed_label(self, value):
-        self.speed_label.setText(f'{value / 100.0:.2f}')
-
-    def _start_base(self, direction):
-        velocity = direction * self.base_speed.value() / 100.0
-        self.node.send_base(velocity)
-        self._base_is_moving = True
-        side = 'left' if direction > 0 else 'right'
-        self._set_event(f'Base rotating {side} at {abs(velocity):.2f}')
-
-    def _stop_base(self):
-        self.node.send_base(0.0)
-        self._base_is_moving = False
-        self._set_event('Base stopped')
-
-    def _jog_target(self, reach_delta, height_delta):
-        self.reach.setValue(self.reach.value() + reach_delta)
-        self.height.setValue(self.height.value() + height_delta)
-        self._send_target()
-
-    def _send_target(self):
-        azimuth_deg = self.azimuth.value()
-        reach = self.reach.value()
-        height = self.height.value()
-        azimuth = radians(azimuth_deg)
-        x = reach * cos(azimuth)
-        y = reach * sin(azimuth)
-        if ik.solve_cartesian(x, y, height) is None:
-            self._set_event(
-                f'Target is outside the safe workspace: '
-                f'r={reach:.3f} m, z={height:.3f} m',
-                warning=True)
+    def _send_gains(self):
+        if self._mask() != 0:
+            self.gains_note.setText('Not sent: disable every joint first.')
             return
-        self.node.send_target(x, y, height)
-        self._set_event(
-            f'Polar target sent: azimuth {azimuth_deg:+.0f}°, '
-            f'reach {reach:.3f} m, height {height:.3f} m')
+        gains = [[s.value() for s in row] for row in self.gain_spins]
+        self.node.send_gains(gains)
+        self.gains_note.setText('Gains sent (firmware applies them only while disabled).')
 
-    def _send_safe_start(self):
-        reach, height = self._start_target()
-        self.azimuth.setValue(0.0)
-        self.reach.setValue(reach)
-        self.height.setValue(height)
-        self._send_target()
+    def _reset_gains(self):
+        for row, defaults in zip(self.gain_spins, DEFAULT_GAINS):
+            for s, v in zip(row, defaults):
+                s.setValue(v)
 
-    def _update_gripper_label(self, value):
-        self.gripper_label.setText(f'{value}%')
+    # ── IK ──────────────────────────────────────────────────────────────────
+    def _auto_phi_changed(self, checked):
+        self.auto_phi = checked
+        self.phi_slider.setEnabled(not checked)
+        if self.ik_goal:
+            self._ik_goal_clicked(self.ik_goal[0], self.ik_goal[1])
 
-    def _set_gripper(self, value):
-        self.gripper.setValue(value)
-        self._send_gripper()
+    def _phi_changed(self, value):
+        self.phi_label.setText(f'{value}°')
+        if self.ik_goal and not self.auto_phi:
+            self._ik_goal_clicked(self.ik_goal[0], self.ik_goal[1])
 
-    def _send_gripper(self):
-        position = self.gripper.value() / 100.0
-        self.node.send_gripper(position)
-        self._set_event(f'Gripper position sent: {position:.2f}')
-
-    def _set_event(self, text, warning=False):
-        self.event_label.setText(text)
-        self.event_label.setObjectName('eventWarning' if warning else 'event')
-        self.event_label.style().unpolish(self.event_label)
-        self.event_label.style().polish(self.event_label)
-
-    def _refresh_status(self):
-        age = None
-        if self.node.last_command_time is not None:
-            age = time.monotonic() - self.node.last_command_time
-
-        if age is not None and age < 1.0:
-            self.status_label.setText('Connected — arm_commander is publishing')
-            self.status_label.setObjectName('statusConnected')
-            base, shoulder, elbow, wrist, gripper = self.node.last_command
-            self.feedback_label.setText(
-                f'Commanded: base {base:+.2f}  |  shoulder {shoulder:+.2f} rad  |  '
-                f'elbow {elbow:+.2f} rad  |  wrist {wrist:+.2f} rad  |  '
-                f'gripper {gripper:.2f}')
+    def _ik_goal_clicked(self, r, z):
+        prev = list(self.targets)
+        if self.auto_phi:
+            _, _, phi_now = kin.forward(prev)
+            found = kin.solve_auto(r, z, prev, phi_hint=phi_now)
+            q, phi = found if found else (None, None)
         else:
-            self.status_label.setText('Waiting for /arm_command from arm_commander…')
-            self.status_label.setObjectName('statusWaiting')
-
-        fb_age = None
-        if self.node.last_feedback_time is not None:
-            fb_age = time.monotonic() - self.node.last_feedback_time
-        if fb_age is not None and fb_age < 1.0:
-            shoulder_deg = degrees(self.node.last_feedback)
-            self.feedback_pot_label.setText(
-                f'Potentiometer (shoulder): {shoulder_deg:.1f}° live')
+            phi = float(self.phi_slider.value())
+            q = kin.solve(r, z, phi, prev)
+        self.view.goal = (r, z)
+        self.view.goal_ok = q is not None
+        if q is None:
+            self.ik_goal = (r, z, None, None)
+            self.goal_label.setText(f'goal r={r:.3f} z={z:.3f}: unreachable within joint limits')
         else:
-            self.feedback_pot_label.setText('Potentiometer: no /shoulder_feedback yet.')
+            self.ik_goal = (r, z, phi, q)
+            if self.auto_phi:
+                self.phi_slider.blockSignals(True)
+                self.phi_slider.setValue(int(round(phi)))
+                self.phi_slider.blockSignals(False)
+                self.phi_label.setText(f'{phi:.0f}°')
+            self.goal_label.setText(
+                f'goal r={r:.3f} z={z:.3f} tip {phi:.0f}°\n'
+                f'joints {q[0]:.1f} / {q[1]:.1f} / {q[2]:.1f}°')
+        self.view.update()
 
-        # Follow /estop (set from another GUI instance, or latched before start).
-        if self.node.estop_active != self._estop_ui:
-            self._apply_estop(self.node.estop_active)
+    def _start_path(self):
+        if not self.ik_goal or self.ik_goal[3] is None:
+            self.path_label.setText('Pick a reachable goal first.')
+            return
+        if self._mask() != 7:
+            self.path_label.setText('Enable all three joints first.')
+            return
+        self.parking = None
+        self.path_goal = self.ik_goal
+        self.path_joint_mode = False
+        self.path_label.setText('Moving along a straight line…')
 
-        warnings = self._limit_warnings()
-        self.limit_label.setVisible(bool(warnings))
-        if warnings:
-            self.limit_label.setText('Joint limit: ' + '; '.join(warnings))
+    def _stop_path(self):
+        self.path_goal = None
+        m = self._measured()
+        if m:
+            for i in range(3):
+                self.targets[i] = clamp_target(i, m[i])
+                self._sync_target_widgets(i)
+        self.path_label.setText('Stopped; holding the measured pose.')
 
-        # Qt does not automatically re-polish a widget after its object name changes.
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+    def _move_joints_toward(self, q):
+        """Step all joints toward q together, capped at MAX_JOINT_RATE."""
+        deltas = [a - b for a, b in zip(q, self.targets)]
+        biggest = max(abs(d) for d in deltas)
+        scale = min(1.0, MAX_JOINT_RATE * TICK_S / biggest) if biggest > 0 else 1.0
+        self.targets = [b + d * scale for b, d in zip(self.targets, deltas)]
+        for i in range(3):
+            self._sync_target_widgets(i)
+        return biggest <= MAX_JOINT_RATE * TICK_S
 
-    def closeEvent(self, event):
-        self.pid_panel.shutdown()
-        self._stop_base()
-        event.accept()
+    def _step_path(self):
+        """Advance the streamed path by one tick.
 
-    @staticmethod
-    def _style_sheet():
-        return """
-            QMainWindow, QWidget {
-                background: #171b22;
-                color: #e8edf2;
-                font-size: 13px;
-            }
-            QLabel#title {
-                font-size: 24px;
-                font-weight: 700;
-                color: #ffffff;
-            }
-            QLabel#subtitle, QLabel#hint {
-                color: #9ba8b4;
-            }
-            QLabel#statusConnected {
-                color: #67d391;
-                font-weight: 600;
-            }
-            QLabel#statusWaiting {
-                color: #f4c56a;
-                font-weight: 600;
-            }
-            QLabel#feedback, QLabel#event, QLabel#eventWarning {
-                background: #10141a;
-                border: 1px solid #303844;
-                border-radius: 6px;
-                padding: 9px;
-            }
-            QLabel#eventWarning { color: #f4c56a; }
-            QGroupBox {
-                border: 1px solid #38414d;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding: 12px 8px 8px 8px;
-                font-weight: 600;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 5px;
-            }
-            QPushButton {
-                background: #2d3642;
-                border: 1px solid #465262;
-                border-radius: 6px;
-                min-height: 34px;
-                padding: 2px 10px;
-            }
-            QPushButton:hover { background: #394555; }
-            QPushButton:pressed { background: #222a34; }
-            QPushButton#primaryButton {
-                background: #2774c7;
-                border-color: #3f8de0;
-                font-weight: 600;
-            }
-            QPushButton#stopButton {
-                background: #a6313c;
-                border-color: #d64b59;
-                font-weight: 700;
-            }
-            QPushButton#iconButton, QPushButton#stopButton {
-                font-size: 20px;
-                min-width: 62px;
-                min-height: 46px;
-                padding: 0;
-            }
-            QPushButton#primaryButton {
-                font-size: 16px;
-                min-height: 42px;
-            }
-            QPushButton#primaryIconButton {
-                background: #2774c7;
-                border: 1px solid #3f8de0;
-                border-radius: 6px;
-                font-size: 24px;
-                font-weight: 700;
-                min-width: 62px;
-                min-height: 46px;
-                padding: 0;
-            }
-            QPushButton#primaryIconButton:hover { background: #3184dc; }
-            QPushButton#primaryIconButton:pressed { background: #1f5fa6; }
-            QLabel#fieldIcon {
-                font-size: 17px;
-                color: #9ba8b4;
-                min-width: 30px;
-            }
-            QDoubleSpinBox {
-                background: #10141a;
-                border: 1px solid #465262;
-                border-radius: 5px;
-                padding: 5px;
-                min-height: 25px;
-            }
-        """
+        Follows a straight tip line while every point on it is solvable; if
+        the line would cross a joint limit, finishes in joint space instead."""
+        r_goal, z_goal, phi_goal, q_goal = self.path_goal
+        if self.path_joint_mode:
+            if self._move_joints_toward(q_goal):
+                self.path_goal = None
+                self.path_label.setText('Reached goal (joint-space move).')
+            return
+        r, z, phi = kin.forward(self.targets)
+        dist = hypot(r_goal - r, z_goal - z)
+        dphi = phi_goal - phi
+        if dist < 1e-4 and abs(dphi) < 0.1:
+            self._move_joints_toward(q_goal)
+            self.path_goal = None
+            self.path_label.setText('Reached goal.')
+            return
+        frac = 1.0
+        if dist > 0:
+            frac = min(frac, TIP_SPEED * TICK_S / dist)
+        if abs(dphi) > 0:
+            frac = min(frac, PHI_SPEED * TICK_S / abs(dphi))
+        q = kin.solve(r + (r_goal - r) * frac, z + (z_goal - z) * frac,
+                      phi + dphi * frac, self.targets)
+        if q is None:
+            self.path_joint_mode = True
+            self.path_label.setText(
+                f'Straight line would cross a joint limit near r={r:.3f} z={z:.3f}; '
+                'finishing in joint space.')
+            self._move_joints_toward(q_goal)
+            return
+        # Near vertical a small tip step can need a large joint step: the rate
+        # cap slows the motion there instead of jumping.
+        self._move_joints_toward(q)
+
+    # ── 20 Hz loop ──────────────────────────────────────────────────────────
+    def _tick(self):
+        t = self._telemetry()
+        now = time.monotonic() - self.t0
+        mask = self._mask()
+        if t is None:
+            self.status_label.setText('No telemetry (ESP32 or micro-ROS agent offline)')
+            self.status_label.setStyleSheet('font-weight:bold; color:#e57373;')
+        else:
+            fault, fjoint = int(t[13]), int(t[14])
+            where = f' ({JOINTS[fjoint - 1]})' if fault and 1 <= fjoint <= 3 else ''
+            state = 'E-STOP ENGAGED' if self.node.estop else (
+                'parking' if self.parking else ('enabled ' + ''.join(
+                    'SEW'[i] if mask & (1 << i) else '-' for i in range(3)) if mask else 'disabled'))
+            self.status_label.setText(
+                f'{state}   fault: {FAULTS.get(fault, fault)}{where}   '
+                f'angles {t[0]:.1f} / {t[1]:.1f} / {t[2]:.1f}°')
+            self.status_label.setStyleSheet(
+                'font-weight:bold; color:%s;' % ('#e57373' if fault or self.node.estop else '#81c784'))
+            for i in range(3):
+                self.measured_labels[i].setText(f'{t[i]:.1f}°   duty {t[9 + i]:+.1f}%')
+                if not self.targets_seeded or not mask & (1 << i):
+                    # Seed from the arm, then keep disabled joints tracking it so
+                    # a later enable never jumps.
+                    if t[i] > 0:
+                        self.targets[i] = clamp_target(i, t[i])
+                        self._sync_target_widgets(i)
+                self.angle_plot.push(JOINTS[i], now, t[i])
+                self.angle_plot.push(f'{JOINTS[i]} target', now, self.targets[i])
+                self.duty_plot.push(JOINTS[i], now, t[9 + i])
+            # The firmware drops enable on any fault: keep the checkboxes honest.
+            if mask != self.requested_mask and not self.parking:
+                self.requested_mask = mask
+                for i, box in enumerate(self.enable_boxes):
+                    box.blockSignals(True)
+                    box.setChecked(bool(mask & (1 << i)))
+                    box.blockSignals(False)
+                if mask == 0:
+                    self.path_goal = None
+        self.angle_plot.advance(now)
+        self.duty_plot.advance(now)
+
+        if self.path_goal is not None:
+            if mask != 7:
+                self.path_goal = None
+                self.path_label.setText('Stopped: a joint was disabled.')
+            else:
+                self._step_path()
+
+        if self.parking is not None:
+            m = self._measured()
+            done = m is not None and all(
+                abs(m[i] - PARK_DEG) < PARK_TOLERANCE for i in range(3) if mask & (1 << i))
+            if mask == 0 or done or time.monotonic() > self.parking:
+                timed_out = not done and mask != 0
+                self.parking = None
+                self._request_mask(0)
+                if timed_out:
+                    self.status_label.setText('Park timed out; disabled anyway')
+
+        self.send_gains_btn.setEnabled(mask == 0)
+        self.estop_btn.setText('RELEASE E-STOP' if self.node.estop else 'E-STOP')
+        self.view.measured = self._measured() if t and all(a > 0 for a in t[:3]) else None
+        self.view.target = list(self.targets)
+        self.view.update()
+        if t is not None:
+            self.targets_seeded = True
+            self.node.send_targets(self.targets)
 
 
 def main(args=None):
-    return qt_ros.run(
-        ArmControlNode, ArmControlWindow,
-        on_exit=lambda node: node.stop_all(), args=args)
+    return qt_ros.run(ArmNode, ArmControlWindow, on_exit=lambda node: node.shutdown(), args=args)
 
 
 if __name__ == '__main__':
