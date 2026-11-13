@@ -207,7 +207,7 @@ is now wired as below (verified by single-joint motor tests):
 
 | Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer | `direction` |
 |---|---|---:|---:|---:|---:|---:|
-| Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | −1 |
+| Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | +1 |
 | Base (DC motor, no feedback) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | — | held LOW |
 | Elbow | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO39 | −1 |
 | Wrist | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 | +1 |

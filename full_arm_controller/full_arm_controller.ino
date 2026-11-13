@@ -99,15 +99,12 @@ struct Joint {
   bool runaway_pending;  // require two consecutive violating control samples
 };
 
-// Potentiometers run from the ESP32 3V3 pin (USB-powered; the motor-side 5 V
-// sagged ~24% under motor current). Tables are the original 5 V captures mapped
-// by new = a * old + b, fitted at 90 and 180 deg on the 3V3 supply:
-// shoulder a 0.664 b -82 (mean of elbow/wrist; verified 1270 vs 1263 at 90 deg),
-// elbow a 0.659 b -87, wrist a 0.669 b -78.
-// Shoulder: midpoint of ascending/descending passes (shoulder_calibration_table.csv).
+// Potentiometers run from the ESP32 3V3 pin (USB-powered).
+// Shoulder: replacement potentiometer, measured at physical 90/135/180 deg.
+// Raw decreases as the shoulder angle increases.
 constexpr CalPoint SHOULDER_CAL[] = {
-    {1006, 75.0f}, {1263, 90.0f}, {1516, 105.0f}, {1702, 120.0f},
-    {1875, 135.0f}, {2016, 150.0f}, {2237, 165.0f}, {2502, 180.0f},
+    {1300, 75.0f}, {1165, 85.0f}, {1098, 90.0f}, {896, 105.0f}, {694, 120.0f},
+    {492, 135.0f}, {360, 150.0f}, {228, 165.0f}, {139, 175.0f}, {96, 180.0f},
 };
 // Elbow: replacement potentiometer, fitted from physical 90/135 deg points.
 constexpr CalPoint ELBOW_CAL[] = {
@@ -184,7 +181,7 @@ enum Fault : unsigned int {
 
 Joint joints[3] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
-     -1.0f, 5.0f, 3.0f, 0.04f},  // verified: IN1 HIGH lowers the shoulder
+     +1.0f, 5.0f, 3.0f, 0.04f},  // replacement shoulder: IN1 HIGH raises measured angle
     {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
