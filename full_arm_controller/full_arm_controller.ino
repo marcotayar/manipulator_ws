@@ -186,7 +186,7 @@ constexpr int GRIPPER_SERVO_CHANNEL = 4;
 constexpr unsigned int SERVO_HZ = 50;
 constexpr unsigned int SERVO_BITS = 16;
 constexpr float GRIP_OPEN_DEG = 90.0f;    // servo angles found by hand on the arm
-constexpr float GRIP_CLOSED_DEG = 155.0f;
+constexpr float GRIP_CLOSED_DEG = 165.0f;
 
 enum Fault : unsigned int {
   FAULT_NONE = 0,
