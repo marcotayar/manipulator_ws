@@ -474,15 +474,34 @@ class ArmControlWindow(QMainWindow):
         self.path_label.setText('Stopped; holding the measured pose.')
 
     def _move_joints_toward(self, q):
-        """Step the planar joints toward q together, capped at MAX_JOINT_RATE."""
+        """Step the planar joints toward q together, capped at MAX_JOINT_RATE.
+
+        Returns True on arrival, False while moving, None if the next step
+        would leave the joint limits or put the arm below the ground; the path
+        is then stopped and the last (valid) target is held."""
         deltas = [a - b for a, b in zip(q, self.targets[:PLANAR])]
         biggest = max(abs(d) for d in deltas)
         scale = min(1.0, MAX_JOINT_RATE * TICK_S / biggest) if biggest > 0 else 1.0
-        for i, d in enumerate(deltas):
-            self.targets[i] += d * scale
+        step = [b + d * scale for b, d in zip(self.targets[:PLANAR], deltas)]
+        if not (kin.within_limits(step) and kin.clears_ground(step)):
+            self.path_goal = None
+            self.path_label.setText('Stopped: the next step would hit the ground or a joint limit.')
+            return None
+        self.targets[:PLANAR] = step
         for i in range(PLANAR):
             self._sync_target_widgets(i)
         return biggest <= MAX_JOINT_RATE * TICK_S
+
+    def _joint_path_clear(self, q_goal, samples=100):
+        """True if the straight joint-space move from the current targets to
+        q_goal stays within limits and above the ground at every sample."""
+        start = self.targets[:PLANAR]
+        for k in range(1, samples + 1):
+            f = k / samples
+            q = [a + (b - a) * f for a, b in zip(start, q_goal)]
+            if not (kin.within_limits(q) and kin.clears_ground(q)):
+                return False
+        return True
 
     def _step_path(self):
         """Advance the streamed path by one tick.
@@ -511,6 +530,12 @@ class ArmControlWindow(QMainWindow):
         q = kin.solve(r + (r_goal - r) * frac, z + (z_goal - z) * frac,
                       phi + dphi * frac, self.targets[:PLANAR])
         if q is None:
+            if not self._joint_path_clear(q_goal):
+                self.path_goal = None
+                self.path_label.setText(
+                    f'Stopped near r={r:.3f} z={z:.3f}: the straight line crosses a joint '
+                    'limit and the joint-space detour would hit the ground.')
+                return
             self.path_joint_mode = True
             self.path_label.setText(
                 f'Straight line would cross a joint limit near r={r:.3f} z={z:.3f}; '
