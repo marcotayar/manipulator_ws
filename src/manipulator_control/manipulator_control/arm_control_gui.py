@@ -2,8 +2,8 @@
 """Qt control panel for full_arm_controller (shoulder, elbow, wrist PID).
 
 Tuning tab: per-joint enable, target and Kp/Ki/Kd/G, live angle and duty plots.
-IK tab: click a point on the side view; the tip follows a straight line there
-while the panel streams intermediate IK solutions as joint targets.
+IK tab: synchronized side and polar views select reach, height and base yaw.
+Stream coordinated joint-space goals or straight tip lines at up to 8 deg/s.
 
 Safety rules the panel enforces:
   * While a joint is disabled its target follows its measured angle, so
@@ -16,12 +16,12 @@ Safety rules the panel enforces:
 
 import sys
 import time
-from math import hypot
+from math import atan2, ceil, cos, degrees, hypot, radians, sin
 
 from PyQt5.QtCore import QPointF, Qt, QTimer
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QPushButton, QSlider, QTabWidget, QVBoxLayout, QWidget)
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32MultiArray, Int32
@@ -45,7 +45,7 @@ LIMITS = tuple(kin.JOINT_LIMITS) + ((20.0, 160.0),)
 # Must match full_arm_controller.ino defaults (joints[], gravity_gain[],
 # friction_gain[]): Kp, Ki, Kd, G (gravity %), F (friction %).
 DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0, 10.0), (4.0, 1.0, 0.04, 28.0, 12.0),
-                 (5.0, 2.0, 0.04, 25.0, 10.0), (4.0, 1.0, 0.04, 0.0, 0.0))
+                 (5.0, 2.0, 0.04, 25.0, 10.0), (5.0, 2.0, 0.04, 0.0, 8.0))
 # Firmware gainsCallback bounds.
 GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0), (0.0, 40.0))
 GAIN_LABELS = ('Kp', 'Ki', 'Kd', 'G %', 'F %')
@@ -58,7 +58,8 @@ PARK_TIMEOUT = 20.0
 TICK_S = 0.05
 TIP_SPEED = 0.03          # m/s along the straight tip path
 PHI_SPEED = 15.0          # deg/s tip-angle change
-MAX_JOINT_RATE = 6.0      # deg/s per joint; below the firmware's 8 deg/s ramp
+MAX_JOINT_RATE = 8.0      # deg/s per joint; firmware's maximum target ramp
+ARRIVAL_TOLERANCE = 3.0   # measured joint error before reporting arrival
 
 
 class ArmNode(Node):
@@ -184,6 +185,78 @@ class ArmView(QWidget):
         p.drawText(8, self.height() - 8, 'solid: measured   dashed: target   +: goal')
 
 
+class PolarView(QWidget):
+    """Top projection; schematic yaw is 0=+X, 90=+Y."""
+
+    RADIUS = 0.48
+
+    def __init__(self, on_click):
+        super().__init__()
+        self.on_click = on_click
+        self.measured = None
+        self.target = None
+        self.goal = None
+        self.goal_ok = True
+        self.setMinimumSize(300, 300)
+
+    def _scale(self):
+        return (min(self.width(), self.height()) - 48) / (2 * self.RADIUS)
+
+    def to_px(self, r, yaw):
+        angle = radians(yaw)
+        return QPointF(self.width() / 2 + r * cos(angle) * self._scale(),
+                       self.height() / 2 - r * sin(angle) * self._scale())
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            x = (event.x() - self.width() / 2) / self._scale()
+            y = (self.height() / 2 - event.y()) / self._scale()
+            self.on_click(hypot(x, y), degrees(atan2(y, x)))
+
+    def _draw_arm(self, p, q, color, dashed):
+        pen = QPen(QColor(color), 2 if dashed else 4)
+        if dashed:
+            pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        points = [self.to_px(r, q[BASE]) for r, _ in kin.forward_points(q[:PLANAR])]
+        for a, b in zip(points, points[1:]):
+            p.drawLine(a, b)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(points[-1], 5, 5)
+        # A short heading remains visible even with the arm vertical.
+        p.drawLine(self.to_px(0, 0), self.to_px(0.07, q[BASE]))
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor('#1d2227'))
+        sector = QPainterPath(self.to_px(0, 0))
+        for yaw in range(20, 161, 2):
+            sector.lineTo(self.to_px(self.RADIUS, yaw))
+        sector.closeSubpath()
+        p.fillPath(sector, QColor('#293c35'))
+        p.setPen(QPen(QColor('#47564e'), 1))
+        p.setBrush(Qt.NoBrush)
+        for radius in (0.1, 0.2, 0.3, 0.4):
+            p.drawEllipse(self.to_px(0, 0), radius * self._scale(), radius * self._scale())
+        for yaw in (20, 90, 160):
+            p.drawLine(self.to_px(0, 0), self.to_px(self.RADIUS, yaw))
+            p.drawText(self.to_px(self.RADIUS, yaw), f'{yaw}°')
+        if self.target is not None:
+            self._draw_arm(p, self.target, '#ffb74d', True)
+        if self.measured is not None:
+            self._draw_arm(p, self.measured, '#4fc3f7', False)
+        if self.goal is not None:
+            p.setPen(QPen(QColor('#81c784' if self.goal_ok else '#e57373'), 2))
+            c = self.to_px(*self.goal)
+            p.drawEllipse(c, 7, 7)
+            p.drawLine(c + QPointF(-10, 0), c + QPointF(10, 0))
+            p.drawLine(c + QPointF(0, -10), c + QPointF(0, 10))
+        p.setPen(QColor('#9ba8b4'))
+        p.drawText(8, 16, 'Top: base yaw 20–160°; rings 0.1 m')
+        p.drawText(8, self.height() - 8, 'solid: measured   dashed: target   +: goal')
+
+
 class ArmControlWindow(QMainWindow):
     def __init__(self, node: ArmNode):
         super().__init__()
@@ -192,8 +265,9 @@ class ArmControlWindow(QMainWindow):
         self.targets = [90.0, 90.0, 90.0, 90.0]
         self.requested_mask = 0
         self.parking = None          # park deadline while parking, else None
-        self.path_goal = None        # (r, z, phi, q) while streaming an IK path
-        self.path_joint_mode = False  # straight line blocked: finishing in joint space
+        self.path_goal = None        # (r, z, phi, planar q, yaw) while streaming
+        self.path_joint_mode = True
+        self.path_base_active = False
         self.auto_phi = True
         # Targets are unknown until the first telemetry sample: the arm may
         # already be enabled by another client, so never publish defaults.
@@ -302,17 +376,48 @@ class ArmControlWindow(QMainWindow):
     def _build_ik_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
+        views = QVBoxLayout()
         self.view = ArmView(self._ik_goal_clicked)
-        layout.addWidget(self.view, 3)
+        self.polar_view = PolarView(self._polar_goal_clicked)
+        views.addWidget(self.view, 1)
+        views.addWidget(self.polar_view, 1)
+        layout.addLayout(views, 3)
         side = QVBoxLayout()
-        side.addWidget(QLabel('Click the view to set a goal for the gripper tip.'))
-        self.auto_phi_box = QCheckBox('Choose tip angle automatically')
+        instructions = QLabel('Click top for reach/yaw, side for reach/height. '
+                              'Schematic yaw: 0°=+X, 90°=+Y; motor direction unverified. '
+                              'Negative reach projects opposite the base heading.')
+        instructions.setWordWrap(True)
+        side.addWidget(instructions)
+        self.reach_spin = QDoubleSpinBox()
+        self.reach_spin.setRange(ArmView.R_MIN, ArmView.R_MAX)
+        self.reach_spin.setDecimals(3)
+        self.reach_spin.setSingleStep(0.01)
+        self.reach_spin.setSuffix(' m')
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(0.0, ArmView.Z_MAX)
+        self.height_spin.setDecimals(3)
+        self.height_spin.setSingleStep(0.01)
+        self.height_spin.setSuffix(' m')
+        self.yaw_spin = QDoubleSpinBox()
+        self.yaw_spin.setRange(*LIMITS[BASE])
+        self.yaw_spin.setDecimals(1)
+        self.yaw_spin.setSingleStep(1.0)
+        self.yaw_spin.setSuffix('°')
+        self.yaw_spin.setValue(90.0)
+        for label, spin in (('Reach (signed)', self.reach_spin),
+                            ('Height', self.height_spin), ('Base yaw', self.yaw_spin)):
+            side.addWidget(QLabel(label))
+            side.addWidget(spin)
+            spin.editingFinished.connect(self._numeric_goal_changed)
+        self.auto_phi_box = QCheckBox('Choose tip angle automatically (prefer down)')
         self.auto_phi_box.setChecked(True)
         self.auto_phi_box.toggled.connect(self._auto_phi_changed)
         side.addWidget(self.auto_phi_box)
-        side.addWidget(QLabel('Tip angle from vertical (0 up, 90 horizontal, 180 down)'))
+        angle_note = QLabel('Tip angle from vertical: 0 up, ±90 horizontal, ±180 down')
+        angle_note.setWordWrap(True)
+        side.addWidget(angle_note)
         self.phi_slider = QSlider(Qt.Horizontal)
-        self.phi_slider.setRange(0, 180)
+        self.phi_slider.setRange(-240, 240)
         self.phi_slider.setValue(90)
         self.phi_slider.setEnabled(False)
         self.phi_slider.valueChanged.connect(self._phi_changed)
@@ -322,18 +427,34 @@ class ArmControlWindow(QMainWindow):
         self.goal_label = QLabel('goal: —')
         self.goal_label.setWordWrap(True)
         side.addWidget(self.goal_label)
-        self.go_btn = QPushButton('Move along straight line')
+        side.addWidget(QLabel('Motion mode'))
+        self.motion_mode = QComboBox()
+        self.motion_mode.addItems(('Coordinated joints (fast point-to-point)',
+                                   'Straight side-plane tip line + yaw'))
+        self.motion_mode.setToolTip(
+            'Joint mode does not keep the tip on a straight line. '
+            'Side-plane r/z line with coordinated yaw, not a straight XYZ path; '
+            'may use a ground-checked joint-space detour.')
+        side.addWidget(self.motion_mode)
+        side.addWidget(QLabel('Maximum joint speed (firmware limit: 8°/s)'))
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.5, MAX_JOINT_RATE)
+        self.speed_spin.setSingleStep(0.5)
+        self.speed_spin.setSuffix(' °/s')
+        self.speed_spin.setValue(MAX_JOINT_RATE)
+        side.addWidget(self.speed_spin)
+        self.go_btn = QPushButton('Move to goal')
         self.go_btn.clicked.connect(self._start_path)
         self.stop_path_btn = QPushButton('Stop motion (hold here)')
         self.stop_path_btn.clicked.connect(self._stop_path)
         side.addWidget(self.go_btn)
         side.addWidget(self.stop_path_btn)
-        self.path_label = QLabel('Requires all three joints enabled.')
+        self.path_label = QLabel('Enable shoulder, elbow and wrist; enable base to change yaw.')
         self.path_label.setWordWrap(True)
         side.addWidget(self.path_label)
         side.addStretch(1)
         layout.addLayout(side, 1)
-        self.ik_goal = None  # (r, z, phi, q)
+        self.ik_goal = None  # (r, z, phi, planar q, yaw)
         return tab
 
     # ── Telemetry helpers ───────────────────────────────────────────────────
@@ -426,101 +547,156 @@ class ArmControlWindow(QMainWindow):
         if self.ik_goal and not self.auto_phi:
             self._ik_goal_clicked(self.ik_goal[0], self.ik_goal[1])
 
-    def _ik_goal_clicked(self, r, z):
+    def _numeric_goal_changed(self):
+        self._ik_goal_clicked(self.reach_spin.value(), self.height_spin.value(),
+                              self.yaw_spin.value())
+
+    def _polar_goal_clicked(self, r, yaw):
+        z = self.ik_goal[1] if self.ik_goal else self.height_spin.value()
+        self._ik_goal_clicked(r, z, yaw)
+
+    def _ik_goal_clicked(self, r, z, yaw=None):
+        if yaw is None:
+            yaw = self.ik_goal[4] if self.ik_goal else self.targets[BASE]
         prev = list(self.targets[:PLANAR])
         if self.auto_phi:
-            _, _, phi_now = kin.forward(prev)
-            found = kin.solve_auto(r, z, prev, phi_hint=phi_now)
+            found = kin.solve_auto(r, z, prev)
             q, phi = found if found else (None, None)
         else:
             phi = float(self.phi_slider.value())
             q = kin.solve(r, z, phi, prev)
+        valid_yaw = LIMITS[BASE][0] <= yaw <= LIMITS[BASE][1]
+        if q is not None and not (kin.within_limits(q) and kin.clears_ground(q)):
+            q = None
+        if not valid_yaw:
+            q = None
+        for spin, value in ((self.reach_spin, r), (self.height_spin, z),
+                            (self.yaw_spin, yaw)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
         self.view.goal = (r, z)
-        self.view.goal_ok = q is not None
+        self.polar_view.goal = (r, yaw)
+        self.view.goal_ok = self.polar_view.goal_ok = q is not None
         if q is None:
-            self.ik_goal = (r, z, None, None)
-            self.goal_label.setText(f'goal r={r:.3f} z={z:.3f}: unreachable within joint limits')
+            self.ik_goal = (r, z, None, None, yaw)
+            reason = ('base yaw must be 20–160°' if not valid_yaw else
+                      'unreachable within joint limits / ground clearance')
+            self.goal_label.setText(f'goal r={r:.3f} z={z:.3f} yaw={yaw:.1f}°: {reason}')
         else:
-            self.ik_goal = (r, z, phi, q)
+            self.ik_goal = (r, z, phi, q, yaw)
             if self.auto_phi:
                 self.phi_slider.blockSignals(True)
                 self.phi_slider.setValue(int(round(phi)))
                 self.phi_slider.blockSignals(False)
                 self.phi_label.setText(f'{phi:.0f}°')
             self.goal_label.setText(
-                f'goal r={r:.3f} z={z:.3f} tip {phi:.0f}°\n'
+                f'goal r={r:.3f} z={z:.3f} yaw={yaw:.1f}° tip {phi:.0f}°\n'
                 f'joints {q[0]:.1f} / {q[1]:.1f} / {q[2]:.1f}°')
         self.view.update()
+        self.polar_view.update()
 
     def _start_path(self):
         if not self.ik_goal or self.ik_goal[3] is None:
             self.path_label.setText('Pick a reachable goal first.')
             return
-        if (self._mask() & PLANAR_MASK) != PLANAR_MASK:
-            self.path_label.setText('Enable shoulder, elbow and wrist first.')
+        mask = self._mask()
+        m = self._measured()
+        if self.node.estop or (self._telemetry() and int(self._telemetry()[13])):
+            self.path_label.setText('Cannot move during e-stop or a firmware fault.')
+            return
+        if (mask & PLANAR_MASK) != PLANAR_MASK or self._planar_measured() is None:
+            self.path_label.setText('Enable shoulder, elbow and wrist with valid feedback first.')
+            return
+        yaw = self.ik_goal[4]
+        changes_yaw = abs(yaw - self.targets[BASE]) > 0.05
+        if changes_yaw and not mask & (1 << BASE):
+            self.path_label.setText('Enable base first to change yaw; it is never enabled automatically.')
+            return
+        base_active = bool(mask & (1 << BASE))
+        if base_active and (m is None or m[BASE] < 0):
+            self.path_label.setText('Cannot move: base feedback is invalid.')
+            return
+        joint_mode = self.motion_mode.currentIndex() == 0
+        if joint_mode and not self._joint_path_clear(self.ik_goal[3]):
+            self.path_label.setText('Not started: the joint-space path crosses the ground or a joint limit.')
             return
         self.parking = None
         self.path_goal = self.ik_goal
-        self.path_joint_mode = False
-        self.path_label.setText('Moving along a straight line…')
+        self.path_joint_mode = joint_mode
+        self.path_base_active = base_active
+        self.path_label.setText('Moving in coordinated joint space…' if joint_mode else
+                                'Moving along a side-plane tip line with coordinated yaw…')
 
     def _stop_path(self):
+        stop_base = self.path_goal is not None and self.path_base_active
         self.path_goal = None
         m = self._measured()
         if m:
-            for i in range(PLANAR):
-                self.targets[i] = clamp_target(i, m[i])
-                self._sync_target_widgets(i)
+            for i in range(len(JOINTS) if stop_base else PLANAR):
+                if m[i] >= 0:
+                    self.targets[i] = clamp_target(i, m[i])
+                    self._sync_target_widgets(i)
         self.path_label.setText('Stopped; holding the measured pose.')
 
-    def _move_joints_toward(self, q):
-        """Step the planar joints toward q together, capped at MAX_JOINT_RATE.
+    def _move_joints_toward(self, q, yaw):
+        """Step participating joints together at the selected rate.
 
-        Returns True on arrival, False while moving, None if the next step
-        would leave the joint limits or put the arm below the ground; the path
-        is then stopped and the last (valid) target is held."""
-        deltas = [a - b for a, b in zip(q, self.targets[:PLANAR])]
+        True means all targets are streamed, not measured arrival. None means
+        blocked: stop the path and retain the last ground-safe target."""
+        goal = list(q) + ([yaw] if self.path_base_active else [])
+        start = self.targets[:len(goal)]
+        deltas = [a - b for a, b in zip(goal, start)]
         biggest = max(abs(d) for d in deltas)
-        scale = min(1.0, MAX_JOINT_RATE * TICK_S / biggest) if biggest > 0 else 1.0
-        step = [b + d * scale for b, d in zip(self.targets[:PLANAR], deltas)]
-        if not (kin.within_limits(step) and kin.clears_ground(step)):
+        max_step = self.speed_spin.value() * TICK_S
+        scale = min(1.0, max_step / biggest) if biggest > 0 else 1.0
+        step = [b + d * scale for b, d in zip(start, deltas)]
+        if not (kin.within_limits(step[:PLANAR]) and kin.clears_ground(step[:PLANAR])
+                and all(lo <= value <= hi for value, (lo, hi) in zip(step, LIMITS))):
             self.path_goal = None
             self.path_label.setText('Stopped: the next step would hit the ground or a joint limit.')
             return None
-        self.targets[:PLANAR] = step
-        for i in range(PLANAR):
+        self.targets[:len(step)] = step
+        for i in range(len(step)):
             self._sync_target_widgets(i)
-        return biggest <= MAX_JOINT_RATE * TICK_S
+        return biggest <= max_step
 
-    def _joint_path_clear(self, q_goal, samples=100):
-        """True if the straight joint-space move from the current targets to
-        q_goal stays within limits and above the ground at every sample."""
+    def _joint_path_clear(self, q_goal):
+        """Preflight joint interpolation at no more than 0.25 degrees/sample."""
         start = self.targets[:PLANAR]
-        for k in range(1, samples + 1):
+        samples = max(1, ceil(max(abs(b - a) for a, b in zip(start, q_goal)) / 0.25))
+        for k in range(samples + 1):
             f = k / samples
             q = [a + (b - a) * f for a, b in zip(start, q_goal)]
             if not (kin.within_limits(q) and kin.clears_ground(q)):
                 return False
         return True
 
-    def _step_path(self):
-        """Advance the streamed path by one tick.
+    def _finish_path(self, q_goal, yaw):
+        """Report arrival only after measured joints, including base, settle."""
+        goal = list(q_goal) + ([yaw] if self.path_base_active else [])
+        measured = self._measured()
+        if measured is not None and all(
+                measured[i] >= 0 and abs(measured[i] - target) <= ARRIVAL_TOLERANCE
+                for i, target in enumerate(goal)):
+            self.path_goal = None
+            self.path_label.setText('Reached goal.')
+        else:
+            self.path_label.setText('Targets streamed; settling to measured goal (within 3°)…')
 
-        Follows a straight tip line while every point on it is solvable; if
-        the line would cross a joint limit, finishes in joint space instead."""
-        r_goal, z_goal, phi_goal, q_goal = self.path_goal
+    def _step_path(self):
+        """Advance joint motion or a side-plane tip line with coordinated yaw."""
+        r_goal, z_goal, phi_goal, q_goal, yaw_goal = self.path_goal
         if self.path_joint_mode:
-            if self._move_joints_toward(q_goal):
-                self.path_goal = None
-                self.path_label.setText('Reached goal (joint-space move).')
+            if self._move_joints_toward(q_goal, yaw_goal) is True:
+                self._finish_path(q_goal, yaw_goal)
             return
         r, z, phi = kin.forward(self.targets[:PLANAR])
         dist = hypot(r_goal - r, z_goal - z)
         dphi = phi_goal - phi
         if dist < 1e-4 and abs(dphi) < 0.1:
-            self._move_joints_toward(q_goal)
-            self.path_goal = None
-            self.path_label.setText('Reached goal.')
+            if self._move_joints_toward(q_goal, yaw_goal) is True:
+                self._finish_path(q_goal, yaw_goal)
             return
         frac = 1.0
         if dist > 0:
@@ -533,18 +709,19 @@ class ArmControlWindow(QMainWindow):
             if not self._joint_path_clear(q_goal):
                 self.path_goal = None
                 self.path_label.setText(
-                    f'Stopped near r={r:.3f} z={z:.3f}: the straight line crosses a joint '
-                    'limit and the joint-space detour would hit the ground.')
+                    f'Stopped near r={r:.3f} z={z:.3f}: the side-plane line is blocked '
+                    'and the joint-space detour would cross the ground or a joint limit.')
                 return
             self.path_joint_mode = True
             self.path_label.setText(
-                f'Straight line would cross a joint limit near r={r:.3f} z={z:.3f}; '
-                'finishing in joint space.')
-            self._move_joints_toward(q_goal)
+                f'Side-plane line blocked near r={r:.3f} z={z:.3f}; '
+                'finishing via a ground-checked joint-space detour.')
+            if self._move_joints_toward(q_goal, yaw_goal) is True:
+                self._finish_path(q_goal, yaw_goal)
             return
-        # Near vertical a small tip step can need a large joint step: the rate
-        # cap slows the motion there instead of jumping.
-        self._move_joints_toward(q)
+        yaw = self.targets[BASE] + (yaw_goal - self.targets[BASE]) * frac
+        # A shared rate cap coordinates yaw and planar joints near singularities.
+        self._move_joints_toward(q, yaw)
 
     # ── 20 Hz loop ──────────────────────────────────────────────────────────
     def _tick(self):
@@ -588,15 +765,19 @@ class ArmControlWindow(QMainWindow):
                     box.blockSignals(True)
                     box.setChecked(bool(mask & (1 << i)))
                     box.blockSignals(False)
-                if mask == 0:
-                    self.path_goal = None
         self.angle_plot.advance(now)
         self.duty_plot.advance(now)
 
         if self.path_goal is not None:
-            if (mask & PLANAR_MASK) != PLANAR_MASK:
+            required = PLANAR_MASK | ((1 << BASE) if self.path_base_active else 0)
+            measured = self._measured()
+            if (mask & required) != required or self.node.estop or (t and int(t[13])):
                 self.path_goal = None
-                self.path_label.setText('Stopped: a joint was disabled.')
+                self.path_label.setText('Stopped: telemetry lost, required joint disabled, e-stop or fault.')
+            elif measured is None or any(
+                    measured[i] < 0 for i in range(len(JOINTS)) if required & (1 << i)):
+                self.path_goal = None
+                self.path_label.setText('Stopped: required joint feedback is invalid.')
             else:
                 self._step_path()
 
@@ -616,6 +797,18 @@ class ArmControlWindow(QMainWindow):
         self.view.measured = self._planar_measured()
         self.view.target = list(self.targets[:PLANAR])
         self.view.update()
+        measured = self._measured()
+        self.polar_view.measured = measured if measured and all(a >= 0 for a in measured) else None
+        self.polar_view.target = list(self.targets)
+        self.polar_view.update()
+        if self.ik_goal is None:
+            r, z, _ = kin.forward(self.targets[:PLANAR])
+            for spin, value in ((self.reach_spin, r), (self.height_spin, z),
+                                (self.yaw_spin, self.targets[BASE])):
+                if not spin.hasFocus():
+                    spin.blockSignals(True)
+                    spin.setValue(value)
+                    spin.blockSignals(False)
         if t is not None:
             self.targets_seeded = True
             self.node.send_targets(self.targets)

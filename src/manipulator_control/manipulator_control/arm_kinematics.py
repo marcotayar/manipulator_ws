@@ -11,7 +11,7 @@ with a_i the absolute lean of link i from vertical. Reach r is horizontal
 distance from the base axis, z is height above the ground. phi is the absolute
 tip angle from vertical in degrees: 0 points up, 90 horizontal, 180 down.
 """
-from math import acos, atan2, cos, degrees, hypot, radians, sin
+from math import acos, atan2, ceil, cos, degrees, hypot, isfinite, radians, sin
 
 BASE_Z = 0.09   # shoulder axis above the ground (m)
 L1 = 0.10       # shoulder -> elbow
@@ -50,18 +50,30 @@ def clears_ground(q):
 
 
 def _solutions(r, z, phi):
-    """Both elbow branches for tip (r, z) at tip angle phi (deg)."""
+    """Distinct elbow branches, using equivalent physical joint angles."""
+    phi = (phi + 180.0) % 360.0 - 180.0
     p = radians(phi)
     wr, wz = r - L3 * sin(p), z - BASE_Z - L3 * cos(p)
     d = hypot(wr, wz)
     c = (d * d - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
-    if not -1.0 <= c <= 1.0:
+    if c < -1.0 - 1e-12 or c > 1.0 + 1e-12:
         return []
+    e_abs = acos(max(-1.0, min(1.0, c)))
     out = []
-    for e in (acos(c), -acos(c)):
+    for e in ((e_abs,) if e_abs == 0.0 else (e_abs, -e_abs)):
         a1 = atan2(wr, wz) - atan2(L2 * sin(e), L1 + L2 * cos(e))
         a1d, ed = degrees(a1), degrees(e)
-        out.append((90.0 + a1d, 90.0 + ed, 90.0 + phi - a1d - ed))
+        angles = (90.0 + a1d, 90.0 + ed, 90.0 + phi - a1d - ed)
+        physical = []
+        for angle, (lo, hi) in zip(angles, JOINT_LIMITS):
+            angle += 360.0 * round(((lo + hi) * 0.5 - angle) / 360.0)
+            # Analytic solutions at a joint stop can differ by roundoff.
+            if lo - 1e-9 <= angle <= hi + 1e-9:
+                angle = max(lo, min(hi, angle))
+            physical.append(angle)
+        q = tuple(physical)
+        if not out or any(abs(a - b) > 1e-9 for a, b in zip(q, out[0])):
+            out.append(q)
     return out
 
 
@@ -78,19 +90,29 @@ def solve(r, z, phi, prev=None):
 
 
 def solve_auto(r, z, prev=None, phi_hint=None, step=2.0):
-    """Like solve(), searching tip angle outward from phi_hint (deg).
+    """Return (q, phi) nearest the hinted orientation, or None.
 
-    Returns (q, phi) or None. Without a hint the search starts horizontal."""
-    start = 90.0 if phi_hint is None else phi_hint
-    k = 0
-    while True:
-        tried = False
-        for phi in ((start,) if k == 0 else (start + k * step, start - k * step)):
-            if -10.0 <= phi <= 190.0:
-                tried = True
-                q = solve(r, z, phi, prev)
-                if q is not None:
-                    return q, phi
-        if not tried:
-            return None
-        k += 1
+    Without a hint, prefer the tip pointing down (180 degrees). Search both
+    directions around the full orientation circle in positive ``step`` degree
+    increments, including the opposite orientation. At equal orientation error,
+    prefer the elbow branch nearest prev; otherwise use a deterministic order.
+    Returned phi is the actual joint-angle sum, as in forward().
+    """
+    if not isfinite(step) or step <= 0.0:
+        raise ValueError('step must be a positive finite angle')
+    start = 180.0 if phi_hint is None else phi_hint
+    start = (start + 180.0) % 360.0 - 180.0
+    for k in range(ceil(180.0 / step) + 1):
+        offset = min(k * step, 180.0)
+        orientations = ((start + offset,) if offset in (0.0, 180.0)
+                        else (start + offset, start - offset))
+        valid = []
+        for phi in orientations:
+            valid.extend(q for q in _solutions(r, z, phi)
+                         if within_limits(q) and clears_ground(q))
+        if valid:
+            q = (valid[0] if prev is None else
+                 min(valid, key=lambda q: sum((a - b) ** 2
+                                             for a, b in zip(q, prev))))
+            return q, sum(q) - 270.0
+    return None

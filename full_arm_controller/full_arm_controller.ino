@@ -201,10 +201,11 @@ Joint joints[4] = {
      -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
      +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
-    // LEDC channel 3 shares timer 1 (20 kHz) with the elbow. Direction and gains
-    // are provisional until the base is pulse-tested.
+    // LEDC channel 3 shares timer 1 (20 kHz) with the elbow.
+    // Base: IN1 HIGH lowers the measured angle. Gains from 10/30 deg steps:
+    // under 0.15 deg final error, under 0.4 deg overshoot, about 12% peak duty.
     {17, 16, 15, 35, 3, BASE_CAL, sizeof(BASE_CAL) / sizeof(CalPoint),
-     +1.0f, 4.0f, 1.0f, 0.04f},
+     -1.0f, 5.0f, 2.0f, 0.04f},
 };
 constexpr int JOINT_COUNT = 4;
 constexpr int BASE_INDEX = 3;
@@ -245,7 +246,7 @@ float gravity_gain[4] = {33.0f, 28.0f, 25.0f, 0.0f};  // base: yaw axis, no grav
 // Percent duty pushed in the direction of setpoint motion. Kinetic friction from
 // the up/down duty difference at 120 deg: shoulder ~14, elbow ~16; defaults stay
 // below it so a breaking-free joint does not overshoot.
-float friction_gain[4] = {10.0f, 12.0f, 10.0f, 0.0f};  // base: not identified yet
+float friction_gain[4] = {10.0f, 12.0f, 10.0f, 8.0f};  // base: without F it stopped ~1.2 deg short
 float arm_command_storage[8];
 float telemetry_storage[TELEMETRY_SIZE];
 std_msgs__msg__Float32MultiArray targets_msg = {};

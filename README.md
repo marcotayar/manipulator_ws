@@ -163,12 +163,21 @@ over `/arm_joint_targets_deg`, `/arm_pid_enable`, `/arm_pid_gains`,
 - **Tuning tab:** per-joint enable, target slider, Kp/Ki/Kd/G (sent only while
   every joint is disabled; defaults mirror the firmware), and live plots of
   angle, target and motor duty. Fault code and joint are shown in the header.
-- **Inverse kinematics tab:** click the side view to set a goal for the gripper
-  tip; the tip angle is chosen automatically or set with the slider. With all
-  three joints enabled, **Move along straight line** streams intermediate IK
-  solutions at 20 Hz (3 cm/s, every joint capped at 6°/s, under the firmware's
-  8°/s ramp). If the straight line would cross a joint limit, the move finishes
-  in joint space and the panel says so.
+- **Inverse kinematics tab:** the side view selects reach and height; the top
+  polar view selects reach and base yaw (20–160°). Yaw uses a schematic
+  0° = +X, 90° = +Y convention; verify the physical base direction before
+  powered use. Changing yaw requires the base to be enabled explicitly.
+  Automatic tip orientation prefers pointing toward the ground; when that
+  cannot reach the goal it chooses the closest feasible orientation (2° search
+  spacing), checking both elbow branches and preferring less joint travel on ties.
+  Manual tip orientation remains available.
+  Coordinated joint-space motion avoids the slow Cartesian/orientation detour;
+  straight side-view tip paths remain selectable (yaw changes simultaneously,
+  so this is not a straight XYZ path). Joint speed is adjustable up to the
+  firmware's unchanged 8°/s cap. This limits command speed, not settling time
+  under friction or load. Ground clearance is checked before joint-space moves
+  and on each streamed target; blocked paths hold the last accepted target.
+  These checks model link centerlines, not link thickness or other obstacles.
 - **Safety:** targets are seeded from the first telemetry sample and disabled
   joints keep tracking their measured angle, so enabling never jumps.
   **Park at 90° & disable** brings every enabled joint to vertical before
@@ -218,7 +227,7 @@ is now wired as below (verified by single-joint motor tests):
 | Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer | `direction` |
 |---|---|---:|---:|---:|---:|---:|
 | Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | +1 |
-| Base (DC motor, yaw) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO35 | +1 (provisional) |
+| Base (DC motor, yaw) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO35 | −1 |
 | Elbow | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO39 | −1 |
 | Wrist | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 | +1 |
 | Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — | — |
@@ -226,7 +235,8 @@ is now wired as below (verified by single-joint motor tests):
 The base is the 4th PID joint, calibrated at 15°, 90° and 180° (raw 98, 1590,
 3472). Below about 15° the wiper is under the ADC's ~0.1 V floor and reads 0, so
 base targets are limited to 20–160° and feedback outside 15–180° faults. Its
-motor direction and gains are not yet verified.
+motor direction is −1 (verified by ±10° and ±30° steps). Base gains Kp 5, Ki 2,
+Kd 0.04, F 8 settle within 0.15° with under 0.4° overshoot at about 12% duty.
 
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
 3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
