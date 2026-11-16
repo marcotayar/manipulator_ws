@@ -166,6 +166,11 @@ constexpr unsigned long TARGET_SETTLE_MS = 300;
 constexpr float FRICTION_FULL_SPEED_DEG_S = 2.0f;
 constexpr float FRICTION_MAX = 40.0f;
 constexpr float SETPOINT_MAX_LAG_DEG = 6.0f;  // ramp waits for a joint held by friction
+// A stuck joint that breaks free runs well above the 8 deg/s ramp; the integral
+// built up against static friction is then shed so it does not drive the joint
+// past the target. Only applies while the integral pushes the way the joint moves.
+constexpr float BREAKAWAY_SPEED_DEG_S = 12.0f;
+constexpr float BREAKAWAY_BLEED = 0.5f;  // integral kept per 50 ms tick while over speed
 constexpr float MAX_DUTY = 80.0f;       // percent; stall cutout protects the TB6612
 constexpr unsigned long TARGET_TIMEOUT_MS = 1000;
 constexpr unsigned long CONTROL_TIMEOUT_MS = 300;  // micro-ROS over Wi-Fi jitters >150 ms
@@ -198,9 +203,9 @@ Joint joints[4] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
      +1.0f, 3.0f, 1.0f, 0.1f},  // Ki 2 wound up across gearbox backlash at 90 deg (4.5 s settle)
     {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
-     -1.0f, 4.0f, 2.0f, 0.04f},  // IN1 HIGH lowers the angle; Ki 1 left it stuck 3 deg off
+     -1.0f, 4.0f, 2.0f, 1.0f},  // IN1 HIGH lowers the angle; Kd 1.0 cut the breakaway lurch 4.9 -> 2.7 deg
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
-     +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
+     +1.0f, 5.0f, 2.0f, 0.04f},  // Kd 0.3-1.0 made shoulder and wrist oscillate below 90 deg
     // LEDC channel 3 shares timer 1 (20 kHz) with the elbow.
     // Base: IN1 HIGH lowers the measured angle. Gains from 10/30 deg steps:
     // under 0.15 deg final error, under 0.4 deg overshoot, about 12% peak duty.
@@ -504,6 +509,10 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
   j.setpoint_velocity += dt / (0.2f + dt) * (ramp_step / dt - j.setpoint_velocity);
   j.setpoint_deg = constrain(j.setpoint_deg, j.measured_deg - SETPOINT_MAX_LAG_DEG,
                              j.measured_deg + SETPOINT_MAX_LAG_DEG);
+  if (fabsf(j.filtered_velocity) > BREAKAWAY_SPEED_DEG_S &&
+      j.integral * j.filtered_velocity > 0.0f) {
+    j.integral *= BREAKAWAY_BLEED;
+  }
   const float error = j.setpoint_deg - j.measured_deg;
   const float abs_error = fabsf(error);
   const bool settled = now - j.target_changed_ms >= TARGET_SETTLE_MS &&
@@ -517,7 +526,8 @@ void controlJoint(Joint &j, int index, float dt, unsigned long now) {
     applyDuty(j, j.gravity_ff + j.integral);
   } else {
     j.p_term = j.kp * error;
-    j.d_term = -j.kd * j.filtered_velocity;
+    // Damp only speed in excess of the commanded ramp.
+    j.d_term = -j.kd * (j.filtered_velocity - j.setpoint_velocity);
     const float candidate_integral =
         constrain(j.integral + j.ki * error * dt, -MAX_DUTY, MAX_DUTY);
     const float pd = j.p_term + j.d_term;

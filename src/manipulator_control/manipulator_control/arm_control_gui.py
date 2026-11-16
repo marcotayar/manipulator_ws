@@ -44,7 +44,7 @@ TELEMETRY_LEN = 20
 LIMITS = tuple(kin.JOINT_LIMITS) + ((20.0, 160.0),)
 # Must match full_arm_controller.ino defaults (joints[], gravity_gain[],
 # friction_gain[]): Kp, Ki, Kd, G (gravity %), F (friction %).
-DEFAULT_GAINS = ((3.0, 1.0, 0.1, 33.0, 10.0), (4.0, 2.0, 0.04, 28.0, 16.0),
+DEFAULT_GAINS = ((3.0, 1.0, 0.1, 33.0, 10.0), (4.0, 2.0, 1.0, 28.0, 16.0),
                  (5.0, 2.0, 0.04, 25.0, 14.0), (5.0, 2.0, 0.04, 0.0, 8.0))
 # Firmware gainsCallback bounds.
 GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0), (0.0, 40.0))

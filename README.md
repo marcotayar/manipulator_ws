@@ -321,13 +321,18 @@ powered; base ±10°/±30°), defaults Kp / Ki / Kd / G / F:
 
 | Joint | Defaults | Result |
 |---|---|---|
-| Shoulder | 3 / 1 / 0.1 / 33 / 10 | settles in about 1 s, overshoot ≤ 1.4°, error ≤ 0.5° |
-| Elbow | 4 / 2 / 0.04 / 28 / 16 | error ≤ 1.5°; 82° → 90° lurches about 4.8° past before recovering |
-| Wrist | 5 / 2 / 0.04 / 25 / 14 | error ≤ 1.3°; below 90° lurches 4–5° past before recovering |
+| Shoulder | 3 / 1 / 0.1 / 33 / 10 | error ≤ 1.0°, overshoot ≤ 2.3° (return to 90°), about 1 s |
+| Elbow | 4 / 2 / 1.0 / 28 / 16 | error ≤ 1.6°, overshoot ≤ 2.7° (4.9° at Kd 0.04) |
+| Wrist | 5 / 2 / 0.04 / 25 / 14 | error ≤ 1.4°; below 90° lurches up to 3.7° before recovering |
 | Base | 5 / 2 / 0.04 / 0 / 8 | error ≤ 0.15°, overshoot ≤ 0.4° |
 
-Elbow and wrist are limited by stick-slip, not gains: they need 30–48% duty to
-break free below 90° and then overshoot. Gains were not tested away from
+Elbow and wrist stick-slip: they need 30–48% duty to break free below 90° and
+then lurch. Two firmware measures limit that: the derivative term damps only
+speed in excess of the commanded ramp (so the elbow's Kd 1.0 brakes a lurch
+without dragging normal motion), and the integral is halved every tick while a
+joint runs above 12°/s in the direction the integral pushes. Keep the wrist at
+Kd 0.04: at 0.3–1.0 the shoulder and wrist oscillate against each other once
+the shoulder leans back past vertical. Gains were not tested away from
 vertical after the 0–180° recalibration.
 
 ```bash
