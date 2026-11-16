@@ -316,10 +316,12 @@ class ArmControlWindow(QMainWindow):
         self.gripper_slider.setRange(0, 100)
         self.gripper_slider.setFixedWidth(120)
         self.gripper_slider.setToolTip('Gripper closure: 0 % open, 100 % closed (ignored during e-stop)')
-        self.gripper_slider.valueChanged.connect(lambda v: self.node.send_gripper(v / 100.0))
+        self.gripper_label = QLabel('0 %')
+        self.gripper_slider.valueChanged.connect(
+            lambda v: (self.gripper_label.setText(f'{v} %'), self.node.send_gripper(v / 100.0)))
         open_btn.clicked.connect(lambda: self._set_gripper(0))
         close_btn.clicked.connect(lambda: self._set_gripper(100))
-        for w in (open_btn, self.gripper_slider, close_btn):
+        for w in (open_btn, self.gripper_slider, self.gripper_label, close_btn):
             bar.addWidget(w)
         for w in (self.enable_all_btn, self.park_btn, self.disable_btn, self.estop_btn):
             bar.addWidget(w)
@@ -330,6 +332,7 @@ class ArmControlWindow(QMainWindow):
         self.gripper_slider.blockSignals(True)
         self.gripper_slider.setValue(percent)
         self.gripper_slider.blockSignals(False)
+        self.gripper_label.setText(f'{percent} %')
         self.node.send_gripper(percent / 100.0)
 
     def _build_tuning_tab(self):
