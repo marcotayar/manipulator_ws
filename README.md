@@ -277,7 +277,7 @@ feedback outside 2–178° faults.
 |---|---|---|
 | `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 10–170°, base 20–160°; refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist, 8 base; 0 disables all; boots disabled |
-| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10/0. The 1.5° deadband applies only after the target has been still for 0.3 s |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10/8. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
 | `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 20 values (below) |
