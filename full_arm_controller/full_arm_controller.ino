@@ -123,9 +123,9 @@ constexpr CalPoint WRIST_CAL[] = {
     {1509, 75.0f}, {1693, 85.0f}, {1785, 90.0f}, {2061, 105.0f}, {2337, 120.0f},
     {2613, 135.0f}, {3048, 150.0f}, {3482, 165.0f}, {3789, 175.0f}, {3942, 180.0f},
 };
-// Base: NOT CALIBRATED. A single point makes every reading invalid, so the base
-// cannot be enabled until raw values are measured at physical 0/90/180 deg.
-constexpr CalPoint BASE_CAL[] = {{0, 0.0f}};
+// Base: measured at physical 15/90/180 deg. Below ~15 deg the wiper is under the
+// ADC's ~0.1 V floor and reads 0, so the table (and the base) stop at 15 deg.
+constexpr CalPoint BASE_CAL[] = {{98, 15.0f}, {1590, 90.0f}, {3472, 180.0f}};
 
 // Piecewise-linear interpolation; works for increasing or decreasing tables.
 // Returns NAN outside the measured table (never extrapolates).
@@ -145,11 +145,11 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 
 // ── Limits and timing ───────────────────────────────────────────────────────
 // Per joint: shoulder, elbow, wrist, base.
-constexpr float TARGET_MIN_DEG[4] = {85.0f, 85.0f, 85.0f, 5.0f};
+constexpr float TARGET_MIN_DEG[4] = {85.0f, 85.0f, 85.0f, 20.0f};
 // Any fault short-brakes every joint: that slows, but does not stop, a falling
 // link, so the arm needs support whenever it is far from vertical.
 constexpr float TARGET_MAX_DEG[4] = {175.0f, 175.0f, 175.0f, 175.0f};
-constexpr float SAFE_MIN_DEG[4] = {80.0f, 80.0f, 80.0f, 0.0f};  // measured outside -> fault
+constexpr float SAFE_MIN_DEG[4] = {80.0f, 80.0f, 80.0f, 15.0f};  // measured outside -> fault
 constexpr float SAFE_MAX_DEG[4] = {178.0f, 178.0f, 178.0f, 180.0f};
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
@@ -203,7 +203,7 @@ Joint joints[4] = {
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
      +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
     // LEDC channel 3 shares timer 1 (20 kHz) with the elbow. Direction and gains
-    // are provisional until the base is calibrated and pulse-tested.
+    // are provisional until the base is pulse-tested.
     {17, 16, 15, 35, 3, BASE_CAL, sizeof(BASE_CAL) / sizeof(CalPoint),
      +1.0f, 4.0f, 1.0f, 0.04f},
 };

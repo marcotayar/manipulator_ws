@@ -218,14 +218,15 @@ is now wired as below (verified by single-joint motor tests):
 | Joint | Driver channel | PWM | IN1 | IN2 | Potentiometer | `direction` |
 |---|---|---:|---:|---:|---:|---:|
 | Shoulder | TB6612 #1 A | GPIO19 | GPIO18 | GPIO5 | GPIO34 | +1 |
-| Base (DC motor, yaw 0–180°) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO35 | +1 (provisional) |
+| Base (DC motor, yaw) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO35 | +1 (provisional) |
 | Elbow | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO39 | −1 |
 | Wrist | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 | +1 |
 | Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — | — |
 
-The base is the 4th PID joint. Its calibration table is a placeholder until raw
-values are measured at 0°, 90° and 180°: until then it reads −1 and cannot be
-enabled. Its direction and gains are unverified.
+The base is the 4th PID joint, calibrated at 15°, 90° and 180° (raw 98, 1590,
+3472). Below about 15° the wiper is under the ADC's ~0.1 V floor and reads 0, so
+base targets are limited to 20–175° and feedback outside 15–180° faults. Its
+motor direction and gains are not yet verified.
 
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
 3V3 for logic VCC, an external motor-rated VM supply, and a common ground.
@@ -260,7 +261,7 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 
 | Topic | Type | Meaning |
 |---|---|---|
-| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 85–175°, base 5–175°; refreshed within 1 s |
+| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 85–175°, base 20–175°; refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist, 8 base; 0 disables all; boots disabled |
 | `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10/0. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
@@ -272,7 +273,7 @@ wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
 elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop, base_deg,
 base_raw, base_target, base_duty]` (the base is appended so earlier indices are
 unchanged). Angles are −1 outside the calibration table. Fault codes: 0 none,
-1 invalid/stale target, 2 feedback invalid or outside 80–178° (base 0–180°),
+1 invalid/stale target, 2 feedback invalid or outside 80–178° (base 15–180°),
 3 control timeout, 4 e-stop, 5 runaway
 (joint moved more than 4° opposite to the applied push, away from its commanded
 target, and is more than 6° (shoulder, elbow) or 10° (wrist) from it, confirmed on two consecutive 20 Hz control
