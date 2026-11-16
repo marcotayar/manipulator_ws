@@ -31,12 +31,21 @@ from manipulator_control import qt_ros
 from manipulator_control.estop import ESTOP_QOS, ESTOP_TOPIC
 from manipulator_control.signal_plot import SignalPlot
 
-JOINTS = ('shoulder', 'elbow', 'wrist')
-COLORS = ('#4fc3f7', '#ffb74d', '#81c784')
+JOINTS = ('shoulder', 'elbow', 'wrist', 'base')
+COLORS = ('#4fc3f7', '#ffb74d', '#81c784', '#ce93d8')
+PLANAR = 3        # shoulder, elbow, wrist: the side-view IK chain
+PLANAR_MASK = 0b0111
+BASE = 3
+# Telemetry indices (firmware appends the base after the original 16 values).
+ANGLE_IDX = (0, 1, 2, 16)
+DUTY_IDX = (9, 10, 11, 19)
+TELEMETRY_LEN = 20
+# Target limits per joint, matching firmware TARGET_MIN_DEG / TARGET_MAX_DEG.
+LIMITS = tuple(kin.JOINT_LIMITS) + ((5.0, 175.0),)
 # Must match full_arm_controller.ino defaults (joints[], gravity_gain[],
 # friction_gain[]): Kp, Ki, Kd, G (gravity %), F (friction %).
 DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0, 10.0), (4.0, 1.0, 0.04, 28.0, 12.0),
-                 (5.0, 2.0, 0.04, 25.0, 10.0))
+                 (5.0, 2.0, 0.04, 25.0, 10.0), (4.0, 1.0, 0.04, 0.0, 0.0))
 # Firmware gainsCallback bounds.
 GAIN_LIMITS = ((0.0, 5.0), (0.0, 2.0), (0.0, 1.0), (0.0, 80.0), (0.0, 40.0))
 GAIN_LABELS = ('Kp', 'Ki', 'Kd', 'G %', 'F %')
@@ -69,7 +78,7 @@ class ArmNode(Node):
         self.create_subscription(Bool, ESTOP_TOPIC, self._estop_cb, ESTOP_QOS)
 
     def _telemetry_cb(self, msg):
-        if len(msg.data) >= 16:
+        if len(msg.data) >= TELEMETRY_LEN:
             self.telemetry = list(msg.data)
             self.telemetry_time = time.monotonic()
 
@@ -96,8 +105,12 @@ class ArmNode(Node):
 
 
 def clamp_target(i, value):
-    lo, hi = kin.JOINT_LIMITS[i]
+    lo, hi = LIMITS[i]
     return max(lo, min(hi, value))
+
+
+def angles(t):
+    return [t[k] for k in ANGLE_IDX]
 
 
 class ArmView(QWidget):
@@ -176,7 +189,7 @@ class ArmControlWindow(QMainWindow):
         super().__init__()
         self.node = node
         self.setWindowTitle('Manipulator — tuning & IK')
-        self.targets = [90.0, 90.0, 90.0]
+        self.targets = [90.0, 90.0, 90.0, 90.0]
         self.requested_mask = 0
         self.parking = None          # park deadline while parking, else None
         self.path_goal = None        # (r, z, phi, q) while streaming an IK path
@@ -208,7 +221,7 @@ class ArmControlWindow(QMainWindow):
         self.status_label.setStyleSheet('font-weight: bold;')
         bar.addWidget(self.status_label, 1)
         self.enable_all_btn = QPushButton('Enable all')
-        self.enable_all_btn.clicked.connect(lambda: self._request_mask(7))
+        self.enable_all_btn.clicked.connect(self._enable_all)
         self.park_btn = QPushButton('Park at 90° && disable')
         self.park_btn.clicked.connect(self._start_park)
         self.disable_btn = QPushButton('Disable now')
@@ -235,7 +248,7 @@ class ArmControlWindow(QMainWindow):
             g.addWidget(enable, 0, 0, 1, 2)
             measured = QLabel('—')
             g.addWidget(measured, 0, 2, 1, 2)
-            lo, hi = kin.JOINT_LIMITS[i]
+            lo, hi = LIMITS[i]
             slider = QSlider(Qt.Horizontal)
             slider.setRange(int(lo * 2), int(hi * 2))
             slider.valueChanged.connect(lambda v, i=i: self._set_target(i, v / 2.0))
@@ -333,7 +346,12 @@ class ArmControlWindow(QMainWindow):
 
     def _measured(self):
         t = self._telemetry()
-        return t[:3] if t else None
+        return angles(t) if t else None
+
+    def _planar_measured(self):
+        """Shoulder/elbow/wrist angles if all three are valid, else None."""
+        m = self._measured()
+        return m[:PLANAR] if m and all(a >= 0 for a in m[:PLANAR]) else None
 
     # ── Commands ────────────────────────────────────────────────────────────
     def _request_mask(self, mask):
@@ -352,6 +370,12 @@ class ArmControlWindow(QMainWindow):
         mask = sum(1 << i for i, b in enumerate(self.enable_boxes) if b.isChecked())
         self._request_mask(mask)
 
+    def _enable_all(self):
+        # An uncalibrated base reads -1; asking for it would reject the enable.
+        m = self._measured()
+        base_ok = m is not None and m[BASE] >= 0
+        self._request_mask(PLANAR_MASK | (1 << BASE if base_ok else 0))
+
     def _set_target(self, i, value):
         self.path_goal = None
         self.targets[i] = clamp_target(i, value)
@@ -368,7 +392,7 @@ class ArmControlWindow(QMainWindow):
         if self._mask() == 0:
             return
         self.path_goal = None
-        for i in range(3):
+        for i in range(PLANAR):  # the base carries no gravity load; it holds where it is
             self.targets[i] = PARK_DEG
             self._sync_target_widgets(i)
         self.parking = time.monotonic() + PARK_TIMEOUT
@@ -403,7 +427,7 @@ class ArmControlWindow(QMainWindow):
             self._ik_goal_clicked(self.ik_goal[0], self.ik_goal[1])
 
     def _ik_goal_clicked(self, r, z):
-        prev = list(self.targets)
+        prev = list(self.targets[:PLANAR])
         if self.auto_phi:
             _, _, phi_now = kin.forward(prev)
             found = kin.solve_auto(r, z, prev, phi_hint=phi_now)
@@ -432,8 +456,8 @@ class ArmControlWindow(QMainWindow):
         if not self.ik_goal or self.ik_goal[3] is None:
             self.path_label.setText('Pick a reachable goal first.')
             return
-        if self._mask() != 7:
-            self.path_label.setText('Enable all three joints first.')
+        if (self._mask() & PLANAR_MASK) != PLANAR_MASK:
+            self.path_label.setText('Enable shoulder, elbow and wrist first.')
             return
         self.parking = None
         self.path_goal = self.ik_goal
@@ -444,18 +468,19 @@ class ArmControlWindow(QMainWindow):
         self.path_goal = None
         m = self._measured()
         if m:
-            for i in range(3):
+            for i in range(PLANAR):
                 self.targets[i] = clamp_target(i, m[i])
                 self._sync_target_widgets(i)
         self.path_label.setText('Stopped; holding the measured pose.')
 
     def _move_joints_toward(self, q):
-        """Step all joints toward q together, capped at MAX_JOINT_RATE."""
-        deltas = [a - b for a, b in zip(q, self.targets)]
+        """Step the planar joints toward q together, capped at MAX_JOINT_RATE."""
+        deltas = [a - b for a, b in zip(q, self.targets[:PLANAR])]
         biggest = max(abs(d) for d in deltas)
         scale = min(1.0, MAX_JOINT_RATE * TICK_S / biggest) if biggest > 0 else 1.0
-        self.targets = [b + d * scale for b, d in zip(self.targets, deltas)]
-        for i in range(3):
+        for i, d in enumerate(deltas):
+            self.targets[i] += d * scale
+        for i in range(PLANAR):
             self._sync_target_widgets(i)
         return biggest <= MAX_JOINT_RATE * TICK_S
 
@@ -470,7 +495,7 @@ class ArmControlWindow(QMainWindow):
                 self.path_goal = None
                 self.path_label.setText('Reached goal (joint-space move).')
             return
-        r, z, phi = kin.forward(self.targets)
+        r, z, phi = kin.forward(self.targets[:PLANAR])
         dist = hypot(r_goal - r, z_goal - z)
         dphi = phi_goal - phi
         if dist < 1e-4 and abs(dphi) < 0.1:
@@ -484,7 +509,7 @@ class ArmControlWindow(QMainWindow):
         if abs(dphi) > 0:
             frac = min(frac, PHI_SPEED * TICK_S / abs(dphi))
         q = kin.solve(r + (r_goal - r) * frac, z + (z_goal - z) * frac,
-                      phi + dphi * frac, self.targets)
+                      phi + dphi * frac, self.targets[:PLANAR])
         if q is None:
             self.path_joint_mode = True
             self.path_label.setText(
@@ -506,26 +531,31 @@ class ArmControlWindow(QMainWindow):
             self.status_label.setStyleSheet('font-weight:bold; color:#e57373;')
         else:
             fault, fjoint = int(t[13]), int(t[14])
-            where = f' ({JOINTS[fjoint - 1]})' if fault and 1 <= fjoint <= 3 else ''
+            where = f' ({JOINTS[fjoint - 1]})' if fault and 1 <= fjoint <= len(JOINTS) else ''
             state = 'E-STOP ENGAGED' if self.node.estop else (
                 'parking' if self.parking else ('enabled ' + ''.join(
-                    'SEW'[i] if mask & (1 << i) else '-' for i in range(3)) if mask else 'disabled'))
+                    'SEWB'[i] if mask & (1 << i) else '-' for i in range(len(JOINTS)))
+                    if mask else 'disabled'))
+            a = angles(t)
             self.status_label.setText(
-                f'{state}   fault: {FAULTS.get(fault, fault)}{where}   '
-                f'angles {t[0]:.1f} / {t[1]:.1f} / {t[2]:.1f}°')
+                f'{state}   fault: {FAULTS.get(fault, fault)}{where}   angles '
+                + ' / '.join(f'{x:.1f}' if x >= 0 else '—' for x in a) + '°')
             self.status_label.setStyleSheet(
                 'font-weight:bold; color:%s;' % ('#e57373' if fault or self.node.estop else '#81c784'))
-            for i in range(3):
-                self.measured_labels[i].setText(f'{t[i]:.1f}°   duty {t[9 + i]:+.1f}%')
+            for i in range(len(JOINTS)):
+                duty = t[DUTY_IDX[i]]
+                self.measured_labels[i].setText(
+                    (f'{a[i]:.1f}°' if a[i] >= 0 else 'not calibrated') + f'   duty {duty:+.1f}%')
                 if not self.targets_seeded or not mask & (1 << i):
                     # Seed from the arm, then keep disabled joints tracking it so
                     # a later enable never jumps.
-                    if t[i] > 0:
-                        self.targets[i] = clamp_target(i, t[i])
+                    if a[i] >= 0:
+                        self.targets[i] = clamp_target(i, a[i])
                         self._sync_target_widgets(i)
-                self.angle_plot.push(JOINTS[i], now, t[i])
+                if a[i] >= 0:
+                    self.angle_plot.push(JOINTS[i], now, a[i])
                 self.angle_plot.push(f'{JOINTS[i]} target', now, self.targets[i])
-                self.duty_plot.push(JOINTS[i], now, t[9 + i])
+                self.duty_plot.push(JOINTS[i], now, duty)
             # The firmware drops enable on any fault: keep the checkboxes honest.
             if mask != self.requested_mask and not self.parking:
                 self.requested_mask = mask
@@ -539,7 +569,7 @@ class ArmControlWindow(QMainWindow):
         self.duty_plot.advance(now)
 
         if self.path_goal is not None:
-            if mask != 7:
+            if (mask & PLANAR_MASK) != PLANAR_MASK:
                 self.path_goal = None
                 self.path_label.setText('Stopped: a joint was disabled.')
             else:
@@ -548,7 +578,7 @@ class ArmControlWindow(QMainWindow):
         if self.parking is not None:
             m = self._measured()
             done = m is not None and all(
-                abs(m[i] - PARK_DEG) < PARK_TOLERANCE for i in range(3) if mask & (1 << i))
+                abs(m[i] - PARK_DEG) < PARK_TOLERANCE for i in range(PLANAR) if mask & (1 << i))
             if mask == 0 or done or time.monotonic() > self.parking:
                 timed_out = not done and mask != 0
                 self.parking = None
@@ -558,8 +588,8 @@ class ArmControlWindow(QMainWindow):
 
         self.send_gains_btn.setEnabled(mask == 0)
         self.estop_btn.setText('RELEASE E-STOP' if self.node.estop else 'E-STOP')
-        self.view.measured = self._measured() if t and all(a > 0 for a in t[:3]) else None
-        self.view.target = list(self.targets)
+        self.view.measured = self._planar_measured()
+        self.view.target = list(self.targets[:PLANAR])
         self.view.update()
         if t is not None:
             self.targets_seeded = True

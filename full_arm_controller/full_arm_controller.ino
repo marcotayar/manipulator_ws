@@ -1,53 +1,56 @@
 /*
-  ESP32 full-arm controller: shoulder/elbow/wrist position PID + base/gripper servos
+  ESP32 full-arm controller: shoulder/elbow/wrist/base position PID + gripper servo
   ==================================================================================
 
-  Hardware map (docs/ligacao_pontes_h_esp32.pdf, docs/full_arm_wiring.html):
+  Hardware map (verified by single-joint tests; README "Full-arm H-bridge wiring"):
     Shoulder: TB6612 #1 A, PWM=19, IN1=18, IN2=5,  pot wiper -> GPIO34
-    Base:     TB6612 #1 B, PWM=17, IN1=16, IN2=15  (held LOW: base not controlled yet)
-    Elbow:    TB6612 #2 B, PWM=32, IN1=14, IN2=13, pot wiper -> GPIO39 (VN)
-    Wrist:    TB6612 #2 A, PWM=23, IN1=22, IN2=21, pot wiper -> GPIO36 (VP)
+    Base:     TB6612 #1 B, PWM=17, IN1=16, IN2=15, pot wiper -> GPIO35
+    Elbow:    TB6612 #2 A, PWM=23, IN1=22, IN2=21, pot wiper -> GPIO39 (VN)
+    Wrist:    TB6612 #2 B, PWM=32, IN1=14, IN2=13, pot wiper -> GPIO36 (VP)
     Both TB6612 STBY pins: GPIO4
     Gripper positional servo signal: GPIO26
 
-  Potentiometers are 5 V referenced and wired directly to the ADC pins. Only the
-  mechanical joint limits keep each wiper below 3.3 V; there is no electrical
-  overvoltage protection. Calibration tables below are valid only for the
-  current pots, mounting, and wiring (see full_arm_controller/*.csv).
+  Potentiometers run from the ESP32 3V3 pin with a common ground. Calibration
+  tables below are valid only for the current pots, mounting, and wiring.
 
-  Angles are PHYSICAL joint angles in degrees (90 = home pose, arm vertical).
-  They are not the arm_ik_2d.py IK frame; /arm_command joint angles are ignored.
+  Angles are PHYSICAL joint angles in degrees. Shoulder/elbow/wrist: 90 = link
+  vertical. Base: 0..180 yaw. Not the arm_ik_2d.py frame; /arm_command joint
+  angles are ignored.
 
   ROS interface (micro-ROS over Wi-Fi, see wifi_config.example.h):
-    /arm_joint_targets_deg (Float32MultiArray): exactly [shoulder, elbow, wrist],
-        each 85..175 deg, refreshed at least every 1 s.
-    /arm_pid_enable (Int32): bitmask, bit0 shoulder, bit1 elbow, bit2 wrist.
-        0 disables all. Boots disabled. Enabling requires fresh valid targets,
-        valid feedback, and no e-stop.
-    /arm_pid_gains (Float32MultiArray): exactly 15 values
-        [Kp,Ki,Kd,G,F shoulder, Kp,Ki,Kd,G,F elbow, Kp,Ki,Kd,G,F wrist]; accepted
-        only while all joints are disabled and e-stop is released. G is the
-        gravity feedforward in percent duty with the link horizontal (0..80):
-        feedforward = -G * sin(lean), lean = sum of (angle - 90) from the
-        shoulder out to that joint. F is friction feedforward in percent duty
-        (0..40), applied in the direction the setpoint moves and scaled from 0 at
-        rest to full at FRICTION_FULL_SPEED_DEG_S. (Separate topics impossible: the
-        prebuilt micro-ROS library allows at most 5 subscriptions.)
+    /arm_joint_targets_deg (Float32MultiArray): exactly [shoulder, elbow, wrist,
+        base], within TARGET_MIN_DEG..TARGET_MAX_DEG per joint, refreshed at
+        least every 1 s.
+    /arm_pid_enable (Int32): bitmask, bit0 shoulder, bit1 elbow, bit2 wrist,
+        bit3 base. 0 disables all. Boots disabled. Enabling requires fresh valid
+        targets, valid feedback, and no e-stop.
+    /arm_pid_gains (Float32MultiArray): exactly 20 values
+        [Kp,Ki,Kd,G,F] x shoulder, elbow, wrist, base; accepted only while all
+        joints are disabled and e-stop is released. G is the gravity feedforward
+        in percent duty with the link horizontal (0..80): feedforward =
+        -G * sin(lean), lean = sum of (angle - 90) from the shoulder out to that
+        joint (the base yaw axis has no gravity term). F is friction feedforward
+        in percent duty (0..40), applied in the direction the setpoint moves and
+        scaled from 0 at rest to full at FRICTION_FULL_SPEED_DEG_S. (Separate
+        topics impossible: the prebuilt micro-ROS library allows at most 5
+        subscriptions.)
     /estop (Bool, transient-local): true disables all joints.
     /arm_command (Float32MultiArray, existing arm_commander contract): only
         [4] gripper 0 open..1 closed is used.
-    /arm_joint_telemetry (Float32MultiArray, 20 Hz): 16 values
+    /arm_joint_telemetry (Float32MultiArray, 20 Hz): 20 values
         [shoulder_deg, elbow_deg, wrist_deg,
          shoulder_raw, elbow_raw, wrist_raw,
          shoulder_target, elbow_target, wrist_target,
          shoulder_duty, elbow_duty, wrist_duty,
-         enabled_mask, fault_code, fault_joint, estop]
+         enabled_mask, fault_code, fault_joint, estop,
+         base_deg, base_raw, base_target, base_duty]
         Angles are -1 when the reading is outside the calibrated table.
         Fault codes: 0 none, 1 invalid/stale target, 2 feedback invalid or
-        outside 80..178 deg, 3 control timeout, 4 e-stop, 5 runaway (joint
-        moved 4 deg opposite to the applied push: wrong direction or sag),
-        6 stall (output at the duty cap for 1 s with under 1 deg of motion).
-        fault_joint: 0 none/all, 1 shoulder, 2 elbow, 3 wrist.
+        outside SAFE_MIN_DEG..SAFE_MAX_DEG, 3 control timeout, 4 e-stop,
+        5 runaway (joint moved 4 deg opposite to the applied push: wrong
+        direction or sag), 6 stall (output at the duty cap for 1 s with under
+        1 deg of motion).
+        fault_joint: 0 none/all, 1 shoulder, 2 elbow, 3 wrist, 4 base.
 
   Set CALIBRATE_MODE 1 to print raw ADC CSV over USB with every actuator
   disabled and Wi-Fi off.
@@ -120,6 +123,9 @@ constexpr CalPoint WRIST_CAL[] = {
     {1509, 75.0f}, {1693, 85.0f}, {1785, 90.0f}, {2061, 105.0f}, {2337, 120.0f},
     {2613, 135.0f}, {3048, 150.0f}, {3482, 165.0f}, {3789, 175.0f}, {3942, 180.0f},
 };
+// Base: NOT CALIBRATED. A single point makes every reading invalid, so the base
+// cannot be enabled until raw values are measured at physical 0/90/180 deg.
+constexpr CalPoint BASE_CAL[] = {{0, 0.0f}};
 
 // Piecewise-linear interpolation; works for increasing or decreasing tables.
 // Returns NAN outside the measured table (never extrapolates).
@@ -138,18 +144,19 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 }
 
 // ── Limits and timing ───────────────────────────────────────────────────────
-constexpr float TARGET_MIN_DEG = 85.0f;
+// Per joint: shoulder, elbow, wrist, base.
+constexpr float TARGET_MIN_DEG[4] = {85.0f, 85.0f, 85.0f, 5.0f};
 // Any fault short-brakes every joint: that slows, but does not stop, a falling
 // link, so the arm needs support whenever it is far from vertical.
-constexpr float TARGET_MAX_DEG[3] = {175.0f, 175.0f, 175.0f};
-constexpr float SAFE_MIN_DEG = 80.0f;   // measured angle outside -> fault
-constexpr float SAFE_MAX_DEG = 178.0f;
+constexpr float TARGET_MAX_DEG[4] = {175.0f, 175.0f, 175.0f, 175.0f};
+constexpr float SAFE_MIN_DEG[4] = {80.0f, 80.0f, 80.0f, 0.0f};  // measured outside -> fault
+constexpr float SAFE_MAX_DEG[4] = {178.0f, 178.0f, 178.0f, 180.0f};
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;
 // Runaway only counts when the joint is also this far from its target: the
 // wrist stick-slips 4-6 deg and the shoulder swings ~4.5 deg across gearbox
 // backlash near vertical, both while holding near target.
-constexpr float RUNAWAY_TARGET_DEG[3] = {6.0f, 6.0f, 10.0f};
+constexpr float RUNAWAY_TARGET_DEG[4] = {6.0f, 6.0f, 10.0f, 6.0f};
 constexpr float STALL_MOVE_DEG = 1.0f;          // less motion than this at the cap = stalled
 constexpr unsigned long STALL_TIME_MS = 1000;   // protects TB6612 (1.2 A continuous)
 constexpr float SETPOINT_RATE_DEG_S = 8.0f;  // slow enough not to whip the wrist
@@ -168,11 +175,6 @@ constexpr unsigned int CONTROL_PERIOD_MS = 50;  // 20 Hz
 constexpr int MOTOR_STBY_PIN = 4;
 constexpr unsigned int MOTOR_PWM_HZ = 20000;
 constexpr unsigned int MOTOR_PWM_BITS = 8;
-
-// Base DC motor channel: held LOW (coast) until base control is implemented.
-constexpr int BASE_PWM_PIN = 17;
-constexpr int BASE_IN1_PIN = 16;
-constexpr int BASE_IN2_PIN = 15;
 
 // Gripper servo on LEDC timer 2 (channel 4) at 50 Hz; motors use timers 0/1.
 constexpr int GRIPPER_SERVO_PIN = 26;
@@ -193,15 +195,21 @@ enum Fault : unsigned int {
 };
 
 
-Joint joints[3] = {
+Joint joints[4] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
      +1.0f, 3.0f, 2.0f, 0.1f},  // Kp 5 oscillated across gearbox backlash near 90 deg
     {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
      -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
      +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
+    // LEDC channel 3 shares timer 1 (20 kHz) with the elbow. Direction and gains
+    // are provisional until the base is calibrated and pulse-tested.
+    {17, 16, 15, 35, 3, BASE_CAL, sizeof(BASE_CAL) / sizeof(CalPoint),
+     +1.0f, 4.0f, 1.0f, 0.04f},
 };
-constexpr int JOINT_COUNT = 3;
+constexpr int JOINT_COUNT = 4;
+constexpr int BASE_INDEX = 3;
+constexpr int PLANAR_JOINT_COUNT = 3;  // shoulder, elbow, wrist: gravity lean chain
 
 unsigned int enabled_mask = 0;
 unsigned int fault_code = FAULT_NONE;
@@ -219,7 +227,8 @@ struct StateLock {
   StateLock() { xSemaphoreTake(state_mutex, portMAX_DELAY); }
   ~StateLock() { xSemaphoreGive(state_mutex); }
 };
-float telemetry_snapshot[16];
+constexpr int TELEMETRY_SIZE = 20;
+float telemetry_snapshot[TELEMETRY_SIZE];
 
 // ── micro-ROS objects ───────────────────────────────────────────────────────
 rcl_publisher_t pub_telemetry;
@@ -227,19 +236,19 @@ rcl_subscription_t sub_targets, sub_enable, sub_gains, sub_estop, sub_arm_comman
 std_msgs__msg__Int32 enable_msg;
 std_msgs__msg__Bool estop_msg;
 // Static backing storage; oversized sequences are rejected by deserialization.
-float targets_storage[3];
-float gains_storage[15];
+float targets_storage[4];
+float gains_storage[20];
 // Percent duty with the link horizontal, from powered holds at 135 deg (G = hold
 // duty minus P correction, over sin(lean)): shoulder 33, elbow 28 (held 137.0 deg,
 // 0.02 deg drift). Wrist 25 is needed once the shoulder leans: with G 0 it was
 // dragged outward during a shoulder move.
-float gravity_gain[3] = {33.0f, 28.0f, 25.0f};
+float gravity_gain[4] = {33.0f, 28.0f, 25.0f, 0.0f};  // base: yaw axis, no gravity
 // Percent duty pushed in the direction of setpoint motion. Kinetic friction from
 // the up/down duty difference at 120 deg: shoulder ~14, elbow ~16; defaults stay
 // below it so a breaking-free joint does not overshoot.
-float friction_gain[3] = {10.0f, 12.0f, 10.0f};
+float friction_gain[4] = {10.0f, 12.0f, 10.0f, 0.0f};  // base: not identified yet
 float arm_command_storage[8];
-float telemetry_storage[16];
+float telemetry_storage[TELEMETRY_SIZE];
 std_msgs__msg__Float32MultiArray targets_msg = {};
 std_msgs__msg__Float32MultiArray gains_msg = {};
 std_msgs__msg__Float32MultiArray arm_command_msg = {};
@@ -266,9 +275,10 @@ void measureJoint(Joint &j) {
   j.measured_deg = j.measurement_valid ? deg : -1.0f;
 }
 
-bool jointInSafeRange(const Joint &j) {
-  return j.measurement_valid && j.measured_deg >= SAFE_MIN_DEG &&
-         j.measured_deg <= SAFE_MAX_DEG;
+bool jointInSafeRange(int i) {
+  const Joint &j = joints[i];
+  return j.measurement_valid && j.measured_deg >= SAFE_MIN_DEG[i] &&
+         j.measured_deg <= SAFE_MAX_DEG[i];
 }
 
 // ── Motor output ────────────────────────────────────────────────────────────
@@ -353,7 +363,7 @@ void targetsCallback(const void *msgin) {
   }
   for (int i = 0; i < JOINT_COUNT; ++i) {
     const float value = msg->data.data[i];
-    if (!isfinite(value) || value < TARGET_MIN_DEG || value > TARGET_MAX_DEG[i]) {
+    if (!isfinite(value) || value < TARGET_MIN_DEG[i] || value > TARGET_MAX_DEG[i]) {
       targets_valid = false;
       fault(FAULT_TARGET, i + 1);
       return;
@@ -387,7 +397,7 @@ void enableCallback(const void *msgin) {
     disableAll();  // ordinary disable keeps the last diagnostic fault visible
     return;
   }
-  const unsigned int mask = (unsigned int)requested & 0x7u;
+  const unsigned int mask = (unsigned int)requested & 0xFu;
   if (mask == 0) {
     disableAll();
     return;
@@ -402,7 +412,7 @@ void enableCallback(const void *msgin) {
     return;
   }
   for (int i = 0; i < JOINT_COUNT; ++i) {
-    if ((mask & (1u << i)) && !jointInSafeRange(joints[i])) {
+    if ((mask & (1u << i)) && !jointInSafeRange(i)) {
       fault(FAULT_FEEDBACK, i + 1);
       return;
     }
@@ -425,7 +435,7 @@ void enableCallback(const void *msgin) {
 void gainsCallback(const void *msgin) {
   StateLock lock;
   const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
-  if (enabled_mask != 0 || estop_active || msg->data.size != 15) return;
+  if (enabled_mask != 0 || estop_active || msg->data.size != 5 * JOINT_COUNT) return;
   for (int i = 0; i < JOINT_COUNT; ++i) {
     const float kp = msg->data.data[5 * i];
     const float ki = msg->data.data[5 * i + 1];
@@ -454,12 +464,13 @@ void gainsCallback(const void *msgin) {
 void updateGravityFeedforward() {
   float lean_deg = 0.0f;
   bool lean_valid = true;
-  for (int i = 0; i < JOINT_COUNT; ++i) {
+  for (int i = 0; i < PLANAR_JOINT_COUNT; ++i) {
     lean_valid = lean_valid && joints[i].measurement_valid;
     lean_deg += joints[i].measured_deg - 90.0f;
     joints[i].gravity_ff =
         lean_valid ? -gravity_gain[i] * sinf(lean_deg * 0.0174533f) : 0.0f;
   }
+  joints[BASE_INDEX].gravity_ff = 0.0f;
 }
 
 void estopCallback(const void *msgin) {
@@ -587,7 +598,7 @@ void controlStep() {
     if (enabled_mask != 0 || fault_code == FAULT_NONE) fault(FAULT_TARGET, 0);
   } else if (enabled_mask != 0) {
     for (int i = 0; i < JOINT_COUNT; ++i) {
-      if ((enabled_mask & (1u << i)) && !jointInSafeRange(joints[i])) {
+      if ((enabled_mask & (1u << i)) && !jointInSafeRange(i)) {
         fault(FAULT_FEEDBACK, i + 1);
         break;
       }
@@ -604,7 +615,7 @@ void controlStep() {
     }
   }
 
-  for (int i = 0; i < JOINT_COUNT; ++i) {
+  for (int i = 0; i < PLANAR_JOINT_COUNT; ++i) {
     const Joint &j = joints[i];
     telemetry_snapshot[i] = j.measured_deg;
     telemetry_snapshot[3 + i] = (float)j.raw;
@@ -615,6 +626,12 @@ void controlStep() {
   telemetry_snapshot[13] = (float)fault_code;
   telemetry_snapshot[14] = (float)fault_joint;
   telemetry_snapshot[15] = estop_active ? 1.0f : 0.0f;
+  // Base appended so the original 16-value layout keeps its indices.
+  const Joint &base = joints[BASE_INDEX];
+  telemetry_snapshot[16] = base.measured_deg;
+  telemetry_snapshot[17] = (float)base.raw;
+  telemetry_snapshot[18] = base.target_deg;
+  telemetry_snapshot[19] = base.output;
 }
 
 void controlTask(void *) {
@@ -662,10 +679,10 @@ void microrosInit() {
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "full_arm_controller", "", &support));
 
-  targets_msg.data = {targets_storage, 0, 3};
-  gains_msg.data = {gains_storage, 0, 15};
+  targets_msg.data = {targets_storage, 0, JOINT_COUNT};
+  gains_msg.data = {gains_storage, 0, 5 * JOINT_COUNT};
   arm_command_msg.data = {arm_command_storage, 0, 8};
-  telemetry_msg.data = {telemetry_storage, 16, 16};
+  telemetry_msg.data = {telemetry_storage, TELEMETRY_SIZE, TELEMETRY_SIZE};
 
   RCCHECK(rclc_publisher_init_default(&pub_telemetry, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
@@ -709,10 +726,6 @@ void microrosInit() {
 void setupOutputsSafe() {
   pinMode(MOTOR_STBY_PIN, OUTPUT);
   digitalWrite(MOTOR_STBY_PIN, LOW);
-  for (const int pin : {BASE_PWM_PIN, BASE_IN1_PIN, BASE_IN2_PIN}) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
-  }
   for (Joint &j : joints) {
     pinMode(j.in1_pin, OUTPUT);
     pinMode(j.in2_pin, OUTPUT);
@@ -734,11 +747,11 @@ void setup() {
 
 #if CALIBRATE_MODE
   Serial.println("Calibration mode; all actuators disabled.");
-  Serial.println("milliseconds,shoulder_gpio34,elbow_gpio39,wrist_gpio36");
+  Serial.println("milliseconds,shoulder_gpio34,elbow_gpio39,wrist_gpio36,base_gpio35");
   while (true) {
     digitalWrite(MOTOR_STBY_PIN, LOW);
-    Serial.printf("%lu,%d,%d,%d\n", millis(), readSettledRaw(34),
-                  readSettledRaw(39), readSettledRaw(36));
+    Serial.printf("%lu,%d,%d,%d,%d\n", millis(), readSettledRaw(34),
+                  readSettledRaw(39), readSettledRaw(36), readSettledRaw(35));
     delay(200);
   }
 #endif
