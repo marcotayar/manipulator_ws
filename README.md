@@ -230,7 +230,7 @@ is now wired as below (verified by single-joint motor tests):
 | Base (DC motor, yaw) | TB6612 #1 B | GPIO17 | GPIO16 | GPIO15 | GPIO35 | −1 |
 | Elbow | TB6612 #2 A | GPIO23 | GPIO22 | GPIO21 | GPIO39 | −1 |
 | Wrist | TB6612 #2 B | GPIO32 | GPIO14 | GPIO13 | GPIO36 | +1 |
-| Gripper, positional servo | Direct servo signal | GPIO26 | — | — | — | — |
+| Gripper, positional servo | Direct servo signal | GPIO33 | — | — | — | — |
 
 The base is the 4th PID joint, calibrated at 15°, 90° and 180° (raw 98, 1590,
 3472). Below about 15° the wiper is under the ADC's ~0.1 V floor and reads 0, so
@@ -279,7 +279,7 @@ feedback outside 2–178° faults.
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist, 8 base; 0 disables all; boots disabled |
 | `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/16/14/8. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
-| `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
+| `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used: 0 open … 1 closed (panel header: Open / slider / Close); ignored during e-stop |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 20 values (below) |
 
 Telemetry: `[shoulder_deg, elbow_deg, wrist_deg, shoulder_raw, elbow_raw,

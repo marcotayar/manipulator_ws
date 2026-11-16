@@ -8,7 +8,7 @@
     Elbow:    TB6612 #2 A, PWM=23, IN1=22, IN2=21, pot wiper -> GPIO39 (VN)
     Wrist:    TB6612 #2 B, PWM=32, IN1=14, IN2=13, pot wiper -> GPIO36 (VP)
     Both TB6612 STBY pins: GPIO4
-    Gripper positional servo signal: GPIO26
+    Gripper positional servo signal: GPIO33
 
   Potentiometers run from the ESP32 3V3 pin with a common ground. Calibration
   tables below are valid only for the current pots, mounting, and wiring.
@@ -181,7 +181,7 @@ constexpr unsigned int MOTOR_PWM_HZ = 20000;
 constexpr unsigned int MOTOR_PWM_BITS = 8;
 
 // Gripper servo on LEDC timer 2 (channel 4) at 50 Hz; motors use timers 0/1.
-constexpr int GRIPPER_SERVO_PIN = 26;
+constexpr int GRIPPER_SERVO_PIN = 33;
 constexpr int GRIPPER_SERVO_CHANNEL = 4;
 constexpr unsigned int SERVO_HZ = 50;
 constexpr unsigned int SERVO_BITS = 16;

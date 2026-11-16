@@ -71,6 +71,8 @@ class ArmNode(Node):
         self.enable_pub = self.create_publisher(Int32, '/arm_pid_enable', 10)
         self.gains_pub = self.create_publisher(Float32MultiArray, '/arm_pid_gains', 10)
         self.estop_pub = self.create_publisher(Bool, ESTOP_TOPIC, ESTOP_QOS)
+        # Firmware reads only [4]: gripper closure, 0 open .. 1 closed.
+        self.gripper_pub = self.create_publisher(Float32MultiArray, '/arm_command', 10)
         self.telemetry = None
         self.telemetry_time = 0.0
         self.estop = False
@@ -97,6 +99,9 @@ class ArmNode(Node):
 
     def send_gains(self, gains):
         self.gains_pub.publish(Float32MultiArray(data=[float(g) for row in gains for g in row]))
+
+    def send_gripper(self, closure):
+        self.gripper_pub.publish(Float32MultiArray(data=[0.0, 0.0, 0.0, 0.0, float(closure)]))
 
     def send_estop(self, engaged):
         self.estop_pub.publish(Bool(data=engaged))
@@ -304,9 +309,28 @@ class ArmControlWindow(QMainWindow):
         self.estop_btn = QPushButton('E-STOP')
         self.estop_btn.setStyleSheet('background:#c62828; color:white; font-weight:bold;')
         self.estop_btn.clicked.connect(self._toggle_estop)
+        bar.addWidget(QLabel('Gripper'))
+        open_btn = QPushButton('Open')
+        close_btn = QPushButton('Close')
+        self.gripper_slider = QSlider(Qt.Horizontal)
+        self.gripper_slider.setRange(0, 100)
+        self.gripper_slider.setFixedWidth(120)
+        self.gripper_slider.setToolTip('Gripper closure: 0 % open, 100 % closed (ignored during e-stop)')
+        self.gripper_slider.valueChanged.connect(lambda v: self.node.send_gripper(v / 100.0))
+        open_btn.clicked.connect(lambda: self._set_gripper(0))
+        close_btn.clicked.connect(lambda: self._set_gripper(100))
+        for w in (open_btn, self.gripper_slider, close_btn):
+            bar.addWidget(w)
         for w in (self.enable_all_btn, self.park_btn, self.disable_btn, self.estop_btn):
             bar.addWidget(w)
         return bar
+
+    def _set_gripper(self, percent):
+        # Publish even if the slider is already there: the servo may have rebooted.
+        self.gripper_slider.blockSignals(True)
+        self.gripper_slider.setValue(percent)
+        self.gripper_slider.blockSignals(False)
+        self.node.send_gripper(percent / 100.0)
 
     def _build_tuning_tab(self):
         tab = QWidget()
