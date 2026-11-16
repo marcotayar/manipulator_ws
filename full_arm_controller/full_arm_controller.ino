@@ -106,22 +106,19 @@ struct Joint {
   unsigned long target_changed_ms;  // last time the commanded target moved
 };
 
-// Potentiometers run from the ESP32 3V3 pin (USB-powered).
-// Shoulder: replacement potentiometer, measured at physical 90/135/165/180 deg.
-// Raw decreases as the shoulder angle increases.
+// Potentiometers run from the ESP32 3V3 pin (USB-powered). Shoulder, elbow and
+// wrist are measured at physical 0/45/90/135/180 deg (0 and 180 = link
+// horizontal, 90 = in line with the previous link) and interpolated between.
+// Shoulder: raw decreases as the angle increases; not linear (6-15 counts/deg).
 constexpr CalPoint SHOULDER_CAL[] = {
-    {1300, 75.0f}, {1165, 85.0f}, {1098, 90.0f}, {896, 105.0f}, {694, 120.0f},
-    {492, 135.0f}, {350, 150.0f}, {207, 165.0f}, {133, 175.0f}, {96, 180.0f},
+    {2367, 0.0f}, {2083, 45.0f}, {1645, 90.0f}, {969, 135.0f}, {452, 180.0f},
 };
-// Elbow: replacement potentiometer, measured at physical 90/135/165/180 deg.
 constexpr CalPoint ELBOW_CAL[] = {
-    {1840, 75.0f}, {2028, 85.0f}, {2123, 90.0f}, {2406, 105.0f}, {2689, 120.0f},
-    {2972, 135.0f}, {3194, 150.0f}, {3416, 165.0f}, {3639, 175.0f}, {3751, 180.0f},
+    {194, 0.0f}, {1085, 45.0f}, {2121, 90.0f}, {2969, 135.0f}, {3812, 180.0f},
 };
-// Wrist: replacement potentiometer, measured at physical 90/135/165/180 deg.
+// Wrist 135: mean of two placements (2967, 2905). 180 is near ADC saturation.
 constexpr CalPoint WRIST_CAL[] = {
-    {1509, 75.0f}, {1693, 85.0f}, {1785, 90.0f}, {2061, 105.0f}, {2337, 120.0f},
-    {2613, 135.0f}, {3048, 150.0f}, {3482, 165.0f}, {3789, 175.0f}, {3942, 180.0f},
+    {173, 0.0f}, {908, 45.0f}, {1884, 90.0f}, {2936, 135.0f}, {3954, 180.0f},
 };
 // Base: measured at physical 15/90/180 deg. Below ~15 deg the wiper is under the
 // ADC's ~0.1 V floor and reads 0, so the table (and the base) stop at 15 deg.
@@ -145,11 +142,13 @@ float rawToDegrees(int raw, const CalPoint *cal, size_t count) {
 
 // ── Limits and timing ───────────────────────────────────────────────────────
 // Per joint: shoulder, elbow, wrist, base.
-constexpr float TARGET_MIN_DEG[4] = {85.0f, 85.0f, 85.0f, 20.0f};
+// Targets stay 10 deg inside each calibrated end so overshoot never leaves the
+// table (feedback outside it is invalid and faults).
+constexpr float TARGET_MIN_DEG[4] = {10.0f, 10.0f, 10.0f, 20.0f};
 // Any fault short-brakes every joint: that slows, but does not stop, a falling
 // link, so the arm needs support whenever it is far from vertical.
-constexpr float TARGET_MAX_DEG[4] = {175.0f, 175.0f, 175.0f, 175.0f};
-constexpr float SAFE_MIN_DEG[4] = {80.0f, 80.0f, 80.0f, 15.0f};  // measured outside -> fault
+constexpr float TARGET_MAX_DEG[4] = {170.0f, 170.0f, 170.0f, 160.0f};
+constexpr float SAFE_MIN_DEG[4] = {2.0f, 2.0f, 2.0f, 15.0f};  // measured outside -> fault
 constexpr float SAFE_MAX_DEG[4] = {178.0f, 178.0f, 178.0f, 180.0f};
 constexpr float DEADBAND_DEG = 1.5f;    // calibration/backlash is ~2-3 deg
 constexpr float RUNAWAY_DEG = 4.0f;

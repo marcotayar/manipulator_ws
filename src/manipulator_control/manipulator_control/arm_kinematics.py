@@ -18,9 +18,9 @@ L1 = 0.10       # shoulder -> elbow
 L2 = 0.09       # elbow -> wrist
 L3 = 0.15       # wrist -> gripper tip (measured on the arm)
 
-# Firmware target limits (TARGET_MIN_DEG / TARGET_MAX_DEG); the wrist is kept
-# below 170 deg because its potentiometer nears ADC saturation at 180.
-JOINT_LIMITS = ((85.0, 175.0), (85.0, 175.0), (85.0, 170.0))
+# Firmware target limits (TARGET_MIN_DEG / TARGET_MAX_DEG): 10 deg inside each
+# calibrated end at 0 and 180.
+JOINT_LIMITS = ((10.0, 170.0), (10.0, 170.0), (10.0, 170.0))
 GROUND_CLEARANCE = 0.0  # no joint or the tip may go below this height (m)
 
 

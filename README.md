@@ -177,7 +177,7 @@ over `/arm_joint_targets_deg`, `/arm_pid_enable`, `/arm_pid_gains`,
 
 Kinematics (`arm_kinematics.py`) use the firmware's physical degrees: 90° is a
 link straight up, larger angles lean outward, and each joint's lean adds to the
-links before it. Targets are limited to 85–175° (wrist 85–170°).
+links before it. Targets are limited to 10–170° (base 20–160°).
 
 For calibrated shoulder feedback and isolated shoulder PID control, use
 `shoulder_pot_feedback/shoulder_pot_feedback.ino`.
@@ -225,7 +225,7 @@ is now wired as below (verified by single-joint motor tests):
 
 The base is the 4th PID joint, calibrated at 15°, 90° and 180° (raw 98, 1590,
 3472). Below about 15° the wiper is under the ADC's ~0.1 V floor and reads 0, so
-base targets are limited to 20–175° and feedback outside 15–180° faults. Its
+base targets are limited to 20–160° and feedback outside 15–180° faults. Its
 motor direction and gains are not yet verified.
 
 GPIO4 drives both TB6612 STBY inputs wired together. Both bridges use ESP32
@@ -249,7 +249,11 @@ arduino-cli compile --fqbn esp32:esp32:esp32 full_arm_controller
 ```
 
 Joint angles are **physical** degrees with 90° as the home pose (arm vertical),
-not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
+not the `arm_ik_2d.py` frame. Shoulder, elbow and wrist are calibrated at 0°,
+45°, 90°, 135° and 180° (0°/180° = link horizontal, 90° = in line with the
+previous link) and interpolated between points; the shoulder pot is noticeably
+non-linear (6–15 counts/°). Commands are limited to 10–170° (base 20–160°);
+feedback outside 2–178° faults.
 
 > **The arm falls on any fault or disable.** Every fault (stale target,
 > invalid feedback, stall, runaway, e-stop) and every ordinary disable
@@ -261,7 +265,7 @@ not the `arm_ik_2d.py` frame. Commands are limited to 85–175°.
 
 | Topic | Type | Meaning |
 |---|---|---|
-| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 85–175°, base 20–175°; refreshed within 1 s |
+| `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 10–170°, base 20–160°; refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist, 8 base; 0 disables all; boots disabled |
 | `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10/0. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
@@ -273,7 +277,7 @@ wrist_raw, shoulder_target, elbow_target, wrist_target, shoulder_duty,
 elbow_duty, wrist_duty, enabled_mask, fault_code, fault_joint, estop, base_deg,
 base_raw, base_target, base_duty]` (the base is appended so earlier indices are
 unchanged). Angles are −1 outside the calibration table. Fault codes: 0 none,
-1 invalid/stale target, 2 feedback invalid or outside 80–178° (base 15–180°),
+1 invalid/stale target, 2 feedback invalid or outside 2–178° (base 15–180°),
 3 control timeout, 4 e-stop, 5 runaway
 (joint moved more than 4° opposite to the applied push, away from its commanded
 target, and is more than 6° (shoulder, elbow) or 10° (wrist) from it, confirmed on two consecutive 20 Hz control

@@ -41,7 +41,7 @@ ANGLE_IDX = (0, 1, 2, 16)
 DUTY_IDX = (9, 10, 11, 19)
 TELEMETRY_LEN = 20
 # Target limits per joint, matching firmware TARGET_MIN_DEG / TARGET_MAX_DEG.
-LIMITS = tuple(kin.JOINT_LIMITS) + ((20.0, 175.0),)
+LIMITS = tuple(kin.JOINT_LIMITS) + ((20.0, 160.0),)
 # Must match full_arm_controller.ino defaults (joints[], gravity_gain[],
 # friction_gain[]): Kp, Ki, Kd, G (gravity %), F (friction %).
 DEFAULT_GAINS = ((3.0, 2.0, 0.1, 33.0, 10.0), (4.0, 1.0, 0.04, 28.0, 12.0),
