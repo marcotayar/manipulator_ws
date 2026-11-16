@@ -277,7 +277,7 @@ feedback outside 2–178° faults.
 |---|---|---|
 | `/arm_joint_targets_deg` | `std_msgs/Float32MultiArray` | Exactly `[shoulder, elbow, wrist, base]`; shoulder/elbow/wrist 10–170°, base 20–160°; refreshed within 1 s |
 | `/arm_pid_enable` | `std_msgs/Int32` | Bitmask: 1 shoulder, 2 elbow, 4 wrist, 8 base; 0 disables all; boots disabled |
-| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/12/10/8. The 1.5° deadband applies only after the target has been still for 0.3 s |
+| `/arm_pid_gains` | `std_msgs/Float32MultiArray` | 20 values `[Kp,Ki,Kd,G,F]` × shoulder/elbow/wrist/base; only while all disabled. `G` = gravity feedforward, 0–80% duty with the link horizontal (base has none). `F` = friction feedforward, 0–40% duty in the direction the setpoint moves (full at 2°/s, zero at rest); defaults 10/16/14/8. The 1.5° deadband applies only after the target has been still for 0.3 s |
 | `/estop` | `std_msgs/Bool` | Transient-local; true disables all joints |
 | `/arm_command` | `std_msgs/Float32MultiArray` | Only `[4]` gripper is used |
 | `/arm_joint_telemetry` | `std_msgs/Float32MultiArray` | 20 Hz, 20 values (below) |
@@ -316,12 +316,19 @@ the shoulder leans; with `G = 0` it was dragged outward during a shoulder move.
 The prebuilt micro-ROS library allows at most 5 subscriptions, so `G` shares the
 gains message instead of having its own topic.
 
-**Commissioning results:** all three directions are verified. Shoulder (Kp 2.0,
-Ki 0.3) and wrist (Kp 4.0, Ki 1.0) reach a 5° step; both need about 10–22% duty
-to break static friction and stick about 2° past the target. The elbow (Kp 4.0,
-Ki 1.0) did not move at all at the 50% cap (stall). Do not raise its cap: MG996R stall
-current exceeds the TB6612's 1.2 A continuous rating. Check VM under load and
-the elbow's mechanical load first. Enable one joint at a time.
+**Tuning results** (±8° steps around 90° with shoulder, elbow and wrist all
+powered; base ±10°/±30°), defaults Kp / Ki / Kd / G / F:
+
+| Joint | Defaults | Result |
+|---|---|---|
+| Shoulder | 3 / 1 / 0.1 / 33 / 10 | settles in about 1 s, overshoot ≤ 1.4°, error ≤ 0.5° |
+| Elbow | 4 / 2 / 0.04 / 28 / 16 | error ≤ 1.5°; 82° → 90° lurches about 4.8° past before recovering |
+| Wrist | 5 / 2 / 0.04 / 25 / 14 | error ≤ 1.3°; below 90° lurches 4–5° past before recovering |
+| Base | 5 / 2 / 0.04 / 0 / 8 | error ≤ 0.15°, overshoot ≤ 0.4° |
+
+Elbow and wrist are limited by stick-slip, not gains: they need 30–48% duty to
+break free below 90° and then overshoot. Gains were not tested away from
+vertical after the 0–180° recalibration.
 
 ```bash
 ros2 topic pub --rate 10 /arm_joint_targets_deg std_msgs/msg/Float32MultiArray "{data: [90.0, 90.0, 90.0]}"

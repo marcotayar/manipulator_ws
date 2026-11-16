@@ -196,9 +196,9 @@ enum Fault : unsigned int {
 
 Joint joints[4] = {
     {19, 18, 5, 34, 0, SHOULDER_CAL, sizeof(SHOULDER_CAL) / sizeof(CalPoint),
-     +1.0f, 3.0f, 2.0f, 0.1f},  // Kp 5 oscillated across gearbox backlash near 90 deg
+     +1.0f, 3.0f, 1.0f, 0.1f},  // Ki 2 wound up across gearbox backlash at 90 deg (4.5 s settle)
     {23, 22, 21, 39, 2, ELBOW_CAL, sizeof(ELBOW_CAL) / sizeof(CalPoint),
-     -1.0f, 4.0f, 1.0f, 0.04f},  // replacement elbow: IN1 HIGH lowers the measured angle
+     -1.0f, 4.0f, 2.0f, 0.04f},  // IN1 HIGH lowers the angle; Ki 1 left it stuck 3 deg off
     {32, 14, 13, 36, 1, WRIST_CAL, sizeof(WRIST_CAL) / sizeof(CalPoint),
      +1.0f, 5.0f, 2.0f, 0.04f},  // TB6612 #2 B: wrist motor
     // LEDC channel 3 shares timer 1 (20 kHz) with the elbow.
@@ -243,10 +243,11 @@ float gains_storage[20];
 // 0.02 deg drift). Wrist 25 is needed once the shoulder leans: with G 0 it was
 // dragged outward during a shoulder move.
 float gravity_gain[4] = {33.0f, 28.0f, 25.0f, 0.0f};  // base: yaw axis, no gravity
-// Percent duty pushed in the direction of setpoint motion. Kinetic friction from
-// the up/down duty difference at 120 deg: shoulder ~14, elbow ~16; defaults stay
-// below it so a breaking-free joint does not overshoot.
-float friction_gain[4] = {10.0f, 12.0f, 10.0f, 8.0f};  // base: without F it stopped ~1.2 deg short
+// Percent duty pushed in the direction of setpoint motion. From +/-8 deg step
+// tests around 90 deg after recalibration: elbow 16 and wrist 14 start the joint
+// with the ramp; elbow 20 swung 5-8 deg. Elbow and wrist still stick-slip
+// (30-48% duty to break free below 90 deg, then a 4-6 deg lurch).
+float friction_gain[4] = {10.0f, 16.0f, 14.0f, 8.0f};  // base: without F it stopped ~1.2 deg short
 float arm_command_storage[8];
 float telemetry_storage[TELEMETRY_SIZE];
 std_msgs__msg__Float32MultiArray targets_msg = {};
