@@ -172,7 +172,8 @@ class ArmView(QWidget):
             p.drawLine(self.to_px(v, self.Z_MIN), self.to_px(v, self.Z_MAX))
             p.drawLine(self.to_px(self.R_MIN, v), self.to_px(self.R_MAX, v))
         p.setPen(QPen(QColor('#9ba8b4'), 2))
-        p.drawLine(self.to_px(self.R_MIN, 0.0), self.to_px(self.R_MAX, 0.0))
+        p.drawLine(self.to_px(self.R_MIN, kin.ground_z(self.R_MIN)),
+                   self.to_px(self.R_MAX, kin.ground_z(self.R_MAX)))
         p.setFont(QFont('Sans', 8))
         p.drawText(8, 16, 'reach (m) →   height (m) ↑   grid 0.1 m')
         if self.target is not None:

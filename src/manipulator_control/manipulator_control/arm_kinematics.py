@@ -21,7 +21,20 @@ L3 = 0.15       # wrist -> gripper tip (measured on the arm)
 # Firmware target limits (TARGET_MIN_DEG / TARGET_MAX_DEG): 10 deg inside each
 # calibrated end at 0 and 180.
 JOINT_LIMITS = ((10.0, 170.0), (10.0, 170.0), (10.0, 170.0))
-GROUND_CLEARANCE = 0.0  # no joint or the tip may go below this height (m)
+# Measured table surface in model coordinates: the tip was rested on the table
+# at three reaches (0.170, 0.210, 0.305 m; base yaw 81-89 deg) and the model
+# read z = 23, 17, 10 mm. The line below is the fit lowered 2.5 mm so all three
+# touches lie on or up to 3 mm above it. The 5.5 deg slope is unexplained (base
+# tilt or angle calibration), so treat it as valid only near those reaches and
+# that yaw.
+GROUND_Z0 = 0.0365      # model z of the table at r = 0 (m)
+GROUND_SLOPE = -0.096   # change of that z per metre of reach
+GROUND_CLEARANCE = 0.0  # extra margin above the measured table (m)
+
+
+def ground_z(r):
+    """Model z of the table surface at reach r."""
+    return GROUND_Z0 + GROUND_SLOPE * r
 
 
 def forward_points(q):
@@ -46,7 +59,7 @@ def within_limits(q):
 
 
 def clears_ground(q):
-    return all(z >= GROUND_CLEARANCE for _, z in forward_points(q)[1:])
+    return all(z >= ground_z(r) + GROUND_CLEARANCE for r, z in forward_points(q)[1:])
 
 
 def _solutions(r, z, phi):

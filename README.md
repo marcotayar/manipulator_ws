@@ -178,6 +178,10 @@ over `/arm_joint_targets_deg`, `/arm_pid_enable`, `/arm_pid_gains`,
   under friction or load. Ground clearance is checked before joint-space moves
   and on each streamed target; blocked paths hold the last accepted target.
   These checks model link centerlines, not link thickness or other obstacles.
+  The ground is a measured line, not z = 0: with the tip resting on the table
+  at 0.17, 0.21 and 0.31 m reach the model read 23, 17 and 10 mm, so
+  `arm_kinematics.ground_z(r)` = 0.0365 − 0.096·r (drawn in the side view).
+  Measured at base yaw 81–89° only; re-measure if the arm or table moves.
 - **Safety:** targets are seeded from the first telemetry sample and disabled
   joints keep tracking their measured angle, so enabling never jumps.
   **Park at 90° & disable** brings every enabled joint to vertical before
